@@ -230,6 +230,38 @@ def _get_profit_by_ticket(position_ticket: int) -> Tuple[bool, Dict[str, Any]]:
     return True, {"open": False, "profit": 0.0}
 
 
+def _get_quote(symbol: str) -> Tuple[bool, Dict[str, Any]]:
+    if not symbol:
+        return False, {"error": "Symbol required"}
+    ok, err = _ensure_symbol_selected(symbol)
+    if not ok:
+        return False, {"error": err}
+    tick = MT5.symbol_info_tick(symbol)
+    if tick is None:
+        return False, {"error": f"No tick data for symbol: {symbol}"}
+    bid = float(getattr(tick, "bid", 0.0) or 0.0)
+    ask = float(getattr(tick, "ask", 0.0) or 0.0)
+    return True, {
+        "symbol": symbol,
+        "bid": bid,
+        "ask": ask,
+        "spread": max(0.0, ask - bid),
+        "time": int(getattr(tick, "time", 0) or 0),
+    }
+
+
+def _get_account_overview() -> Tuple[bool, Dict[str, Any]]:
+    info = MT5.account_info()
+    if info is None:
+        return False, {"error": "Account not available"}
+    return True, {
+        "balance": float(getattr(info, "balance", 0.0) or 0.0),
+        "equity": float(getattr(info, "equity", 0.0) or 0.0),
+        "margin": float(getattr(info, "margin", 0.0) or 0.0),
+        "login": int(getattr(info, "login", 0) or 0),
+    }
+
+
 def worker_main(request_queue, response_queue, terminal_path: Optional[str] = None, label: str = "") -> None:
     """Worker process entrypoint. One worker per MT5 terminal.
 
@@ -356,6 +388,21 @@ def worker_main(request_queue, response_queue, terminal_path: Optional[str] = No
                 elif cmd == "get_profit":
                     position_ticket = int(params.get("position_ticket", 0))
                     ok, data = _get_profit_by_ticket(position_ticket)
+                    if not ok:
+                        respond(req_id, "error", error=str(data.get("error")))
+                    else:
+                        respond(req_id, "ok", data=data)
+
+                elif cmd == "get_quote":
+                    symbol = params.get("symbol")
+                    ok, data = _get_quote(str(symbol or ""))
+                    if not ok:
+                        respond(req_id, "error", error=str(data.get("error")))
+                    else:
+                        respond(req_id, "ok", data=data)
+
+                elif cmd == "get_account_info":
+                    ok, data = _get_account_overview()
                     if not ok:
                         respond(req_id, "error", error=str(data.get("error")))
                     else:
