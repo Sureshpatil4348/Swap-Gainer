@@ -44,4 +44,19 @@ Notes
 - Only trades created by this app are shown in the table.
 - Profit values refresh periodically; closed pairs are removed from the table.
 
+Persistence
+-----------
+
+- The UI persists its session data (paired trades, trade counter, and the last used terminal
+  paths) to ``%USERPROFILE%\.swap_gainer\state.json`` on Windows (or ``~/.swap_gainer/state.json``
+  on other platforms).
+- State is saved after every trade create/close event and again during shutdown so that the app
+  can restore open positions on the next launch.
+- When the application starts it automatically reloads the saved file, reconnects to the recorded
+  terminals, validates that the saved tickets are still open, and repopulates the table for any
+  trades that remain active. Closed or invalid entries are discarded.
+- If the JSON file becomes corrupted or you need to reset the saved state, exit the application,
+  delete ``state.json`` (or move it aside), and restart the UI. The app will report any load/save
+  errors in a pop-up dialog so operators are aware of persistence issues.
+
 

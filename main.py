@@ -1,8 +1,10 @@
+import json
 import os
 import sys
-import uuid
-import time
+import tempfile
 import threading
+import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Any, Optional
 
@@ -194,6 +196,8 @@ class App:
         self.connected2 = False
         self.trade_counter = 1
         self.paired_trades: Dict[str, Dict[str, Any]] = {}
+        self._state_dir = os.path.join(os.path.expanduser("~"), ".swap_gainer")
+        self._state_path = os.path.join(self._state_dir, "state.json")
 
         # UI Vars
         self.terminal1_var = tk.StringVar(value=DEFAULT_TERMINAL_1)
@@ -204,6 +208,7 @@ class App:
         self.lot2_var = tk.StringVar()
 
         self._build_ui()
+        self._load_and_restore_state()
         self._schedule_profit_updates()
 
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -293,26 +298,8 @@ class App:
             messagebox.showerror("Error", "Please provide both terminal paths.")
             return
 
-        try:
-            self.worker1 = WorkerClient("A1", path1)
-            self.worker2 = WorkerClient("A2", path2)
-            # Connect in parallel
-            with ThreadPoolExecutor(max_workers=2) as ex:
-                f1 = ex.submit(self.worker1.connect, path1)
-                f2 = ex.submit(self.worker2.connect, path2)
-                d1 = f1.result(timeout=25)
-                d2 = f2.result(timeout=25)
-            self.connected1 = True
-            self.connected2 = True
-            self.status1.configure(text="connected", foreground="#070")
-            self.status2.configure(text="connected", foreground="#070")
-            self.buy_btn.configure(state="normal")
-            self.sell_btn.configure(state="normal")
-            self.buy1_sell2_btn.configure(state="normal")
-            self.sell1_buy2_btn.configure(state="normal")
-        except Exception as e:
-            messagebox.showerror("Connection Failed", str(e))
-            self._cleanup_workers()
+        if self._connect_workers(path1, path2):
+            self._save_state()
 
     def _on_place(self, side: str) -> None:
         # Backwards-compatible: same side on both accounts
@@ -365,50 +352,34 @@ class App:
             if pos1 <= 0 or pos2 <= 0:
                 raise RuntimeError("Failed to obtain position tickets for both accounts.")
 
-            self.paired_trades[trade_id] = {
-                "account1": {"symbol": symbol1, "lot": lot1, "side": side1, "position": pos1, "magic": magic1},
-                "account2": {"symbol": symbol2, "lot": lot2, "side": side2, "position": pos2, "magic": magic2},
+            info = {
+                "account1": {
+                    "symbol": symbol1,
+                    "lot": float(lot1),
+                    "side": side1,
+                    "position": pos1,
+                    "magic": magic1,
+                    "entry_price": float(r1.get("entry_price"))
+                    if isinstance(r1.get("entry_price"), (int, float))
+                    else None,
+                    "entry_time": int(r1.get("entry_time") or 0),
+                },
+                "account2": {
+                    "symbol": symbol2,
+                    "lot": float(lot2),
+                    "side": side2,
+                    "position": pos2,
+                    "magic": magic2,
+                    "entry_price": float(r2.get("entry_price"))
+                    if isinstance(r2.get("entry_price"), (int, float))
+                    else None,
+                    "entry_time": int(r2.get("entry_time") or 0),
+                },
             }
 
-            side_label = (
-                f"{side1.upper()}/{side2.upper()}" if side1 != side2 else side1.upper()
-            )
-
-            # Entry details
-            eprice1 = r1.get("entry_price")
-            eprice2 = r2.get("entry_price")
-            etime1 = r1.get("entry_time") or 0
-            etime2 = r2.get("entry_time") or 0
-
-            def _fmt_time(ts: int) -> str:
-                if not ts:
-                    return ""
-                try:
-                    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(int(ts)))
-                except Exception:
-                    return str(ts)
-
-            self.table.add_row(
-                trade_id,
-                [
-                    trade_id,
-                    symbol1,
-                    lot1,
-                    f"{eprice1:.5f}" if isinstance(eprice1, (int, float)) else "",
-                    _fmt_time(int(etime1)),
-                    "0.00",
-                    symbol2,
-                    lot2,
-                    f"{eprice2:.5f}" if isinstance(eprice2, (int, float)) else "",
-                    _fmt_time(int(etime2)),
-                    "0.00",
-                    side_label,
-                    "0.00",
-                    "Close",
-                ],
-                dynamic_indices={"p1": 5, "p2": 10, "combined": 12},
-                close_callback=self._on_close_pair,
-            )
+            self.paired_trades[trade_id] = info
+            self._add_trade_row(trade_id, info, 0.0, 0.0)
+            self._save_state()
 
         except Exception as e:
             messagebox.showerror("Trade Error", str(e))
@@ -429,6 +400,7 @@ class App:
             # Remove UI row and internal state
             self.table.remove_row(trade_id)
             self.paired_trades.pop(trade_id, None)
+            self._save_state()
         except Exception as e:
             messagebox.showerror("Close Error", str(e))
 
@@ -436,6 +408,7 @@ class App:
         self.root.after(800, self._update_profits)
 
     def _update_profits(self) -> None:
+        state_changed = False
         try:
             for trade_id, info in list(self.paired_trades.items()):
                 a1 = info["account1"]
@@ -459,7 +432,10 @@ class App:
                 if not p1.get("open") and not p2.get("open"):
                     self.table.remove_row(trade_id)
                     self.paired_trades.pop(trade_id, None)
+                    state_changed = True
         finally:
+            if state_changed:
+                self._save_state()
             self._schedule_profit_updates()
 
     def _cleanup_workers(self) -> None:
@@ -475,12 +451,228 @@ class App:
         self.connected2 = False
         self.buy_btn.configure(state="disabled")
         self.sell_btn.configure(state="disabled")
+        self.buy1_sell2_btn.configure(state="disabled")
+        self.sell1_buy2_btn.configure(state="disabled")
         self.status1.configure(text="disconnected", foreground="#b00")
         self.status2.configure(text="disconnected", foreground="#b00")
 
     def on_close(self) -> None:
+        self._save_state()
         self._cleanup_workers()
         self.root.destroy()
+
+    def _connect_workers(self, path1: str, path2: str, show_errors: bool = True) -> bool:
+        self.terminal1_var.set(path1)
+        self.terminal2_var.set(path2)
+        self._cleanup_workers()
+        try:
+            self.worker1 = WorkerClient("A1", path1)
+            self.worker2 = WorkerClient("A2", path2)
+            with ThreadPoolExecutor(max_workers=2) as ex:
+                f1 = ex.submit(self.worker1.connect, path1)
+                f2 = ex.submit(self.worker2.connect, path2)
+                f1.result(timeout=25)
+                f2.result(timeout=25)
+            self.connected1 = True
+            self.connected2 = True
+            self.status1.configure(text="connected", foreground="#070")
+            self.status2.configure(text="connected", foreground="#070")
+            self.buy_btn.configure(state="normal")
+            self.sell_btn.configure(state="normal")
+            self.buy1_sell2_btn.configure(state="normal")
+            self.sell1_buy2_btn.configure(state="normal")
+            return True
+        except Exception as e:
+            if show_errors:
+                messagebox.showerror("Connection Failed", str(e))
+            self._cleanup_workers()
+            return False
+
+    def _format_time(self, ts: int) -> str:
+        if not ts:
+            return ""
+        try:
+            return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(int(ts)))
+        except Exception:
+            return str(ts)
+
+    def _add_trade_row(self, trade_id: str, info: Dict[str, Any], profit1: float, profit2: float) -> None:
+        a1 = info.get("account1", {})
+        a2 = info.get("account2", {})
+        side1 = (a1.get("side") or "").upper()
+        side2 = (a2.get("side") or "").upper()
+        if side1 and side2 and side1 != side2:
+            side_label = f"{side1}/{side2}"
+        else:
+            side_label = side1 or side2
+
+        values = [
+            trade_id,
+            a1.get("symbol", ""),
+            a1.get("lot", ""),
+            f"{a1.get('entry_price', 0.0):.5f}" if isinstance(a1.get("entry_price"), (int, float)) else "",
+            self._format_time(int(a1.get("entry_time") or 0)),
+            f"{profit1:.2f}",
+            a2.get("symbol", ""),
+            a2.get("lot", ""),
+            f"{a2.get('entry_price', 0.0):.5f}" if isinstance(a2.get("entry_price"), (int, float)) else "",
+            self._format_time(int(a2.get("entry_time") or 0)),
+            f"{profit2:.2f}",
+            side_label,
+            f"{(profit1 + profit2):.2f}",
+            "Close",
+        ]
+
+        self.table.add_row(
+            trade_id,
+            values,
+            dynamic_indices={"p1": 5, "p2": 10, "combined": 12},
+            close_callback=self._on_close_pair,
+        )
+        self.table.set_profits(trade_id, profit1, profit2, profit1 + profit2)
+
+    def _load_state(self) -> Optional[Dict[str, Any]]:
+        if not os.path.exists(self._state_path):
+            return {}
+        try:
+            with open(self._state_path, "r", encoding="utf-8") as fh:
+                return json.load(fh)
+        except Exception as e:
+            messagebox.showerror("Persistence Error", f"Failed to load saved state:\n{e}")
+            return None
+
+    def _save_state(self) -> None:
+        data = {
+            "trade_counter": self.trade_counter,
+            "terminal_paths": {
+                "terminal1": self.terminal1_var.get(),
+                "terminal2": self.terminal2_var.get(),
+            },
+            "paired_trades": self.paired_trades,
+        }
+
+        try:
+            os.makedirs(self._state_dir, exist_ok=True)
+            fd, tmp_path = tempfile.mkstemp(dir=self._state_dir, prefix="state_", suffix=".json")
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(data, fh, indent=2)
+            os.replace(tmp_path, self._state_path)
+        except Exception as e:
+            messagebox.showerror("Persistence Error", f"Failed to save app state:\n{e}")
+
+    def _normalize_trade_info(self, info: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        normalized: Dict[str, Dict[str, Any]] = {}
+        for key in ("account1", "account2"):
+            account = info.get(key)
+            if not isinstance(account, dict):
+                return None
+            try:
+                position = int(account.get("position", 0))
+                magic = int(account.get("magic", 0))
+            except Exception:
+                return None
+            if position <= 0:
+                return None
+            entry_price = account.get("entry_price")
+            if isinstance(entry_price, (int, float)):
+                ep = float(entry_price)
+            else:
+                ep = None
+            entry_time_raw = account.get("entry_time") or 0
+            try:
+                entry_time = int(entry_time_raw)
+            except Exception:
+                entry_time = 0
+            normalized[key] = {
+                "symbol": account.get("symbol", ""),
+                "lot": float(account.get("lot", 0.0)),
+                "side": account.get("side", ""),
+                "position": position,
+                "magic": magic,
+                "entry_price": ep,
+                "entry_time": entry_time,
+            }
+        return normalized
+
+    def _load_and_restore_state(self) -> None:
+        state = self._load_state()
+        if state is None:
+            return
+
+        try:
+            self.trade_counter = max(int(state.get("trade_counter", 1)), 1)
+        except Exception:
+            self.trade_counter = 1
+
+        terminals = state.get("terminal_paths") or {}
+        path1 = terminals.get("terminal1") or self.terminal1_var.get()
+        path2 = terminals.get("terminal2") or self.terminal2_var.get()
+        if path1:
+            self.terminal1_var.set(path1)
+        if path2:
+            self.terminal2_var.set(path2)
+
+        saved_trades = state.get("paired_trades") or {}
+        if not saved_trades:
+            return
+
+        if not path1 or not path2:
+            messagebox.showwarning(
+                "State Restore",
+                "Saved trades were found but terminal paths were missing. They were not restored.",
+            )
+            return
+
+        if not self._connect_workers(path1, path2, show_errors=False):
+            messagebox.showerror(
+                "State Restore",
+                "Could not reconnect to both terminals using the saved paths. Saved trades could not be validated.",
+            )
+            return
+
+        restored = 0
+        dropped = []
+        for trade_id, raw_info in saved_trades.items():
+            normalized = self._normalize_trade_info(raw_info)
+            if not normalized:
+                dropped.append(trade_id)
+                continue
+            try:
+                p1 = self.worker1.get_profit(normalized["account1"]["position"])
+                p2 = self.worker2.get_profit(normalized["account2"]["position"])
+            except Exception:
+                dropped.append(trade_id)
+                continue
+
+            if not (p1.get("open") and p2.get("open")):
+                dropped.append(trade_id)
+                continue
+
+            self.paired_trades[trade_id] = normalized
+            profit1 = float(p1.get("profit", 0.0))
+            profit2 = float(p2.get("profit", 0.0))
+            self._add_trade_row(trade_id, normalized, profit1, profit2)
+            restored += 1
+
+        if dropped:
+            messagebox.showinfo(
+                "State Restore",
+                f"Discarded {len(dropped)} saved trade(s) that were no longer open or were invalid.",
+            )
+        if restored:
+            messagebox.showinfo(
+                "State Restore",
+                f"Restored {restored} paired trade(s) from the previous session.",
+            )
+        else:
+            if not dropped:
+                messagebox.showinfo(
+                    "State Restore",
+                    "Saved trades were found but none could be restored.",
+                )
+
+        # Persist normalized state (removes stale entries from disk)
+        self._save_state()
 
 
 def main() -> None:
