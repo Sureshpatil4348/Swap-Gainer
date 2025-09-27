@@ -11,7 +11,7 @@ from automation import (
     AppConfig,
     AutomationState,
     RiskConfig,
-    ScheduleModel,
+    ThreadSchedule,
     TrackedTrade,
     drawdown_breached,
     mark_schedule_triggered,
@@ -33,34 +33,38 @@ class AutomationLogicTests(unittest.TestCase):
         self.assertIsNone(parse_time_string(""))
 
     def test_schedule_triggers_once_per_day(self) -> None:
-        schedule = ScheduleModel("primary", enabled=True, time_str="09:15", weekdays=[0])
-        risk = RiskConfig()
+        schedule = ThreadSchedule(
+            thread_id="primary-1",
+            name="Primary Set 1",
+            enabled=True,
+            entry_start="09:15",
+            entry_end="09:45",
+            weekdays=[0],
+        )
 
         now = datetime(2024, 5, 6, 9, 10, tzinfo=timezone.utc)
-        self.assertFalse(schedule_should_trigger(schedule, now, risk, self.state))
+        self.assertFalse(schedule_should_trigger(schedule, now, self.state))
 
-        now = datetime(2024, 5, 6, 9, 16, tzinfo=timezone.utc)
-        self.assertTrue(schedule_should_trigger(schedule, now, risk, self.state))
+        now = datetime(2024, 5, 6, 9, 20, tzinfo=timezone.utc)
+        self.assertTrue(schedule_should_trigger(schedule, now, self.state))
         mark_schedule_triggered(self.state, schedule, now)
-        self.assertFalse(schedule_should_trigger(schedule, now, risk, self.state))
+        self.assertFalse(schedule_should_trigger(schedule, now, self.state))
 
-        # Next day allowed
+        # Next occurrence allowed
         next_day = now + timedelta(days=7)
-        self.assertTrue(schedule_should_trigger(schedule, next_day, risk, self.state))
+        self.assertTrue(schedule_should_trigger(schedule, next_day, self.state))
 
     def test_trades_due_for_close_by_duration(self) -> None:
-        risk = RiskConfig(close_after_minutes=60, max_exit_spread=0)
         opened = self.now - timedelta(minutes=65)
-        trade = TrackedTrade("T1", opened, ("EURUSD", "USDJPY"))
-        result = trades_due_for_close([trade], self.now, risk, {"EURUSD": 2.0})
+        trade = TrackedTrade("T1", opened, ("EURUSD", "USDJPY"), 60, 0.0)
+        result = trades_due_for_close([trade], self.now, {"EURUSD": 2.0})
         self.assertEqual(result, ["T1"])
 
     def test_trades_due_for_close_by_spread(self) -> None:
-        risk = RiskConfig(close_after_minutes=0, max_exit_spread=0.5)
         opened = self.now - timedelta(minutes=10)
-        trade = TrackedTrade("T2", opened, ("EURUSD", "USDJPY"))
+        trade = TrackedTrade("T2", opened, ("EURUSD", "USDJPY"), 0, 0.5)
         spreads = {"EURUSD": 0.4, "USDJPY": 0.3}
-        self.assertEqual(trades_due_for_close([trade], self.now, risk, spreads), ["T2"])
+        self.assertEqual(trades_due_for_close([trade], self.now, spreads), ["T2"])
 
     def test_drawdown_detection(self) -> None:
         risk = RiskConfig(drawdown_enabled=True, drawdown_stop=5.0)
@@ -71,11 +75,10 @@ class AutomationLogicTests(unittest.TestCase):
         self.assertTrue(drawdown_breached(risk, accounts))
 
     def test_spread_entry_check(self) -> None:
-        risk = RiskConfig(max_entry_spread=0.8)
         spreads = {"EURUSD": 0.6, "USDJPY": 0.7}
-        self.assertTrue(spreads_within_entry_limit(["EURUSD", "USDJPY"], spreads, risk))
+        self.assertTrue(spreads_within_entry_limit(["EURUSD", "USDJPY"], spreads, 0.8))
         spreads["USDJPY"] = 1.0
-        self.assertFalse(spreads_within_entry_limit(["EURUSD", "USDJPY"], spreads, risk))
+        self.assertFalse(spreads_within_entry_limit(["EURUSD", "USDJPY"], spreads, 0.8))
 
 
 if __name__ == "__main__":
