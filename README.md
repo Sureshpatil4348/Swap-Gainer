@@ -38,6 +38,17 @@ Usage
 4. Click BUY (Simultaneous) or SELL (Simultaneous).
 5. Manage pairs in the table; use Close on a row to close both trades.
 
+Configuration
+-------------
+
+- Automation settings now live in `automation_config.json`. Each section contains an
+  ordered list of trade "threads" you can customise with entry windows, symbols,
+  directions, lot sizes, spread limits, and weekdays. The UI reads this file at
+  startup and displays a structured overview of every configured schedule along
+  with the next eligible run time.
+- Runtime state (e.g. last time a schedule executed) is stored separately in
+  `automation_state.json`. Editing the configuration file will not reset history.
+
 Notes
 
 - The app resolves .lnk shortcuts to the target terminal automatically (requires pywin32).

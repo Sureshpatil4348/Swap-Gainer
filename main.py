@@ -4,9 +4,9 @@ import uuid
 import time
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import datetime, timedelta, date
 from pathlib import Path
-from typing import Dict, Any, Optional, Sequence
+from typing import Dict, Any, Optional, Sequence, Union
 from zoneinfo import ZoneInfo
 
 import tkinter as tk
@@ -23,6 +23,7 @@ from automation import (
     TrackedTrade,
     drawdown_breached,
     mark_schedule_triggered,
+    parse_time_string,
     schedule_should_trigger,
     spreads_within_entry_limit,
     trades_due_for_close,
@@ -234,6 +235,7 @@ class AutomationRunner:
                 changed = self.app.evaluate_automation(now, config, state)
                 if changed:
                     self.persistence.save_state(state)
+                    self.app.on_state_updated(state)
             except Exception as exc:
                 print(f"Automation loop error: {exc}", file=sys.stderr)
             finally:
@@ -258,7 +260,7 @@ class App:
         self.paired_trades: Dict[str, Dict[str, Any]] = {}
         self._trade_lock = threading.Lock()
 
-        self.persistence = Persistence(Path("automation_state.json"))
+        self.persistence = Persistence(Path("automation_state.json"), Path("automation_config.json"))
         self.config = self.persistence.get_config()
         self.automation_runner = AutomationRunner(self, self.persistence)
 
@@ -280,6 +282,7 @@ class App:
         self.config_summary_var = tk.StringVar(value="")
 
         self._build_ui()
+        self._refresh_schedule_overview()
         self._schedule_profit_updates()
 
         self.automation_runner.start()
@@ -392,11 +395,64 @@ class App:
             row=1, column=1, sticky="w", padx=6, pady=4
         )
 
+        automation.rowconfigure(2, weight=1)
+        overview_frame = ttk.LabelFrame(automation, text="Scheduled Trade Overview")
+        overview_frame.grid(row=2, column=0, columnspan=2, sticky="nsew", padx=6, pady=(4, 8))
+        overview_frame.columnconfigure(0, weight=1)
+        overview_frame.rowconfigure(0, weight=1)
+
+        columns = (
+            "schedule",
+            "status",
+            "pairs",
+            "lots",
+            "direction",
+            "window",
+            "days",
+            "next",
+            "last",
+        )
+        self.schedule_tree = ttk.Treeview(
+            overview_frame,
+            columns=columns,
+            show="headings",
+            height=6,
+        )
+        headings = {
+            "schedule": "Schedule",
+            "status": "Status",
+            "pairs": "Pairs",
+            "lots": "Lots",
+            "direction": "Direction",
+            "window": "Entry Window",
+            "days": "Days",
+            "next": "Next Run",
+            "last": "Last Run",
+        }
+        for col in columns:
+            self.schedule_tree.heading(col, text=headings[col])
+            stretch = col in {"schedule", "pairs", "window"}
+            width = 140
+            if col == "pairs":
+                width = 170
+            elif col == "window":
+                width = 150
+            elif col == "schedule":
+                width = 160
+            elif col == "days":
+                width = 110
+            self.schedule_tree.column(col, width=width, stretch=stretch)
+
+        schedule_scroll = ttk.Scrollbar(overview_frame, orient="vertical", command=self.schedule_tree.yview)
+        self.schedule_tree.configure(yscrollcommand=schedule_scroll.set)
+        self.schedule_tree.grid(row=0, column=0, sticky="nsew")
+        schedule_scroll.grid(row=0, column=1, sticky="ns")
+
         direction_options = [
             self._direction_key_to_display(key) for key in ("buy_sell", "sell_buy", "buy_buy", "sell_sell")
         ]
 
-        row = 2
+        row = 3
         row = self._render_thread_section(
             automation,
             row,
@@ -644,6 +700,135 @@ class App:
             lines.append(f"  • {self._thread_summary_line(thread)}")
         self.config_summary_var.set("\n".join(lines))
 
+    def _refresh_schedule_overview(self, state: Optional[AutomationState] = None) -> None:
+        if not hasattr(self, "schedule_tree"):
+            return
+        if state is None:
+            state = self.persistence.get_state()
+        tz_name = self.config.timezone or "UTC"
+        try:
+            tz = ZoneInfo(tz_name)
+        except Exception:
+            tz = ZoneInfo("UTC")
+        now = datetime.now(tz)
+        schedules = [*self.config.primary_threads, *self.config.wednesday_threads]
+        rows = [self._schedule_overview_row(schedule, state, now) for schedule in schedules]
+
+        def _update_tree() -> None:
+            self.schedule_tree.delete(*self.schedule_tree.get_children())
+            for values in rows:
+                self.schedule_tree.insert("", "end", values=values)
+
+        self._invoke_on_ui(_update_tree)
+
+    def on_state_updated(self, state: AutomationState) -> None:
+        self._refresh_schedule_overview(state)
+
+    def _schedule_overview_row(
+        self, schedule: ThreadSchedule, state: AutomationState, now: datetime
+    ) -> tuple[str, str, str, str, str, str, str, str, str]:
+        status = "ENABLED" if schedule.enabled else "Disabled"
+        pair_desc = f"{schedule.symbol1 or '-'} / {schedule.symbol2 or '-'}"
+        lots = f"{self._format_number(schedule.lot1)} / {self._format_number(schedule.lot2)}"
+        direction = self._direction_key_to_display(schedule.direction)
+        window = self._format_entry_window(schedule)
+        days = self._format_weekdays(schedule.weekdays)
+        last_run_iso = state.last_runs.get(schedule.thread_id)
+        last_run_date = self._parse_iso_date(last_run_iso)
+        last_run_display = last_run_date.strftime("%Y-%m-%d") if last_run_date else "Never"
+        next_run_dt = self._next_schedule_time(schedule, now, last_run_date)
+        if isinstance(next_run_dt, datetime):
+            if abs((next_run_dt - now).total_seconds()) < 1:
+                next_run_display = "Window active"
+            else:
+                next_run_display = self._format_datetime(next_run_dt)
+        else:
+            next_run_display = next_run_dt or "—"
+        return (
+            f"{schedule.name} ({schedule.thread_id})",
+            status,
+            pair_desc,
+            lots,
+            direction,
+            window,
+            days,
+            next_run_display,
+            last_run_display,
+        )
+
+    @staticmethod
+    def _format_entry_window(schedule: ThreadSchedule) -> str:
+        if schedule.entry_start and schedule.entry_end:
+            return f"{schedule.entry_start} - {schedule.entry_end}"
+        if schedule.entry_start:
+            return f"from {schedule.entry_start}"
+        if schedule.entry_end:
+            return f"until {schedule.entry_end}"
+        return "Configure window"
+
+    @staticmethod
+    def _format_weekdays(weekdays: Sequence[int]) -> str:
+        if not weekdays:
+            return "All days"
+        names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+        try:
+            ordered = sorted({int(day) % 7 for day in weekdays})
+        except Exception:
+            return "All days"
+        return ", ".join(names[day] for day in ordered)
+
+    @staticmethod
+    def _parse_iso_date(value: Optional[str]) -> Optional[date]:
+        if not value:
+            return None
+        try:
+            return date.fromisoformat(value)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _format_datetime(dt: datetime) -> str:
+        return dt.strftime("%Y-%m-%d %H:%M")
+
+    def _next_schedule_time(
+        self, schedule: ThreadSchedule, now: datetime, last_run: Optional[date]
+    ) -> Optional[Union[datetime, str]]:
+        if not schedule.enabled:
+            return None
+        start_time = parse_time_string(schedule.entry_start)
+        if start_time is None:
+            return "Set entry time"
+        end_time = parse_time_string(schedule.entry_end) if schedule.entry_end else None
+        weekdays = list(schedule.weekdays) if schedule.weekdays else list(range(7))
+
+        for offset in range(14):
+            candidate_date = now.date() + timedelta(days=offset)
+            if weekdays and candidate_date.weekday() not in weekdays:
+                continue
+            start_dt = datetime.combine(candidate_date, start_time, tzinfo=now.tzinfo)
+            end_dt = None
+            if end_time:
+                end_dt = datetime.combine(candidate_date, end_time, tzinfo=now.tzinfo)
+                if end_time <= start_time:
+                    end_dt += timedelta(days=1)
+            if offset == 0:
+                if last_run and last_run == candidate_date:
+                    if end_dt and now <= end_dt:
+                        continue
+                    if not end_dt and now <= start_dt:
+                        continue
+                if start_dt <= now and end_dt and now <= end_dt:
+                    if not last_run or last_run != candidate_date:
+                        return now
+                    continue
+                if now <= start_dt and (not last_run or last_run != candidate_date):
+                    return start_dt
+                continue
+            if last_run and last_run == candidate_date:
+                continue
+            return start_dt
+        return None
+
     @staticmethod
     def _direction_key_to_sides(key: str) -> Sequence[str]:
         mapping = {
@@ -705,6 +890,7 @@ class App:
         self.drawdown_enabled_var.set(config.risk.drawdown_enabled)
         self.drawdown_stop_var.set(self._format_number(config.risk.drawdown_stop))
         self._update_config_summary()
+        self._refresh_schedule_overview()
 
     def _set_automation_status(self, message: str, ok: bool = True) -> None:
         color = "#070" if ok else "#b00"
