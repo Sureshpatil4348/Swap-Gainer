@@ -262,6 +262,14 @@ class App:
 
         self.persistence = Persistence(Path("automation_state.json"), Path("automation_config.json"))
         self.config = self.persistence.get_config()
+        self.state = self.persistence.get_state()
+        self.trade_history: list[Dict[str, Any]] = []
+        self.trade_history_limit = 250
+        for entry in getattr(self.state, "trade_history", []):
+            if isinstance(entry, dict):
+                self.trade_history.append(dict(entry))
+        if len(self.trade_history) > self.trade_history_limit:
+            self.trade_history = self.trade_history[-self.trade_history_limit:]
         self.automation_runner = AutomationRunner(self, self.persistence)
 
         # UI Vars
@@ -273,16 +281,16 @@ class App:
         self.pair2_var = tk.StringVar(value=primary_default.symbol2)
         self.lot2_var = tk.StringVar(value=str(primary_default.lot2))
 
-        self.market_timezone_var = tk.StringVar(value=self.config.timezone)
-        self.drawdown_enabled_var = tk.BooleanVar(value=self.config.risk.drawdown_enabled)
-        self.drawdown_stop_var = tk.StringVar(value=str(self.config.risk.drawdown_stop))
-
-        self.primary_thread_vars = self._init_thread_vars(self.config.primary_threads)
-        self.wednesday_thread_vars = self._init_thread_vars(self.config.wednesday_threads)
-        self.config_summary_var = tk.StringVar(value="")
+        self.automation_status_label = None
+        self.schedule_tree = None
+        self.config_tree = None
+        self.trade_history_tree = None
+        self._scroll_canvas = None
+        self._scrollable_body = None
 
         self._build_ui()
-        self._refresh_schedule_overview()
+        self._refresh_schedule_overview(self.state)
+        self._populate_trade_history_tree()
         self._schedule_profit_updates()
 
         self.automation_runner.start()
@@ -292,10 +300,11 @@ class App:
     def _build_ui(self) -> None:
         pad = {"padx": 6, "pady": 4}
 
-        top = ttk.Frame(self.root)
-        top.pack(fill="x", padx=8, pady=8)
+        top = ttk.LabelFrame(self.root, text="Connections")
+        top.pack(fill="x", padx=12, pady=(12, 6))
+        for col in range(4):
+            top.columnconfigure(col, weight=1 if col == 1 else 0)
 
-        # Terminal Paths
         ttk.Label(top, text="Terminal 1 Path").grid(row=0, column=0, sticky="w", **pad)
         ttk.Entry(top, textvariable=self.terminal1_var, width=60).grid(row=0, column=1, sticky="ew", **pad)
         self.status1 = ttk.Label(top, text="disconnected", foreground="#b00")
@@ -309,45 +318,52 @@ class App:
         connect_btn = ttk.Button(top, text="Connect Both", command=self._on_connect)
         connect_btn.grid(row=0, column=3, rowspan=2, sticky="nsew", **pad)
 
-        # Trade inputs
-        ttk.Label(top, text="Pair (Account 1)").grid(row=2, column=0, sticky="w", **pad)
-        ttk.Entry(top, textvariable=self.pair1_var, width=16).grid(row=2, column=1, sticky="w", **pad)
-        ttk.Label(top, text="Lot Size (Account 1)").grid(row=2, column=2, sticky="e", **pad)
-        ttk.Entry(top, textvariable=self.lot1_var, width=12).grid(row=2, column=3, sticky="w", **pad)
+        self.automation_status_label = ttk.Label(top, text="", foreground="#555")
+        self.automation_status_label.grid(row=2, column=0, columnspan=4, sticky="w", padx=6, pady=(0, 4))
 
-        ttk.Label(top, text="Pair (Account 2)").grid(row=3, column=0, sticky="w", **pad)
-        ttk.Entry(top, textvariable=self.pair2_var, width=16).grid(row=3, column=1, sticky="w", **pad)
-        ttk.Label(top, text="Lot Size (Account 2)").grid(row=3, column=2, sticky="e", **pad)
-        ttk.Entry(top, textvariable=self.lot2_var, width=12).grid(row=3, column=3, sticky="w", **pad)
+        body_container = ttk.Frame(self.root)
+        body_container.pack(fill="both", expand=True, padx=12, pady=(0, 12))
 
-        # Action buttons
-        actions = ttk.Frame(self.root)
-        actions.pack(fill="x", padx=8)
-        self.buy_btn = ttk.Button(actions, text="BUY (Simultaneous)", command=lambda: self._on_place("buy"), state="disabled")
-        self.buy_btn.pack(side="left", padx=6, pady=4)
-        self.sell_btn = ttk.Button(actions, text="SELL (Simultaneous)", command=lambda: self._on_place("sell"), state="disabled")
-        self.sell_btn.pack(side="left", padx=6, pady=4)
+        canvas = tk.Canvas(body_container, borderwidth=0, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(body_container, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
 
-        # Mixed direction buttons
-        self.buy1_sell2_btn = ttk.Button(
-            actions,
-            text="BUY A1 / SELL A2",
-            command=lambda: self._on_place_mixed("buy", "sell"),
-            state="disabled",
+        scrollable_body = ttk.Frame(canvas)
+        scrollable_body.bind(
+            "<Configure>",
+            lambda event: canvas.configure(scrollregion=canvas.bbox("all")),
         )
-        self.buy1_sell2_btn.pack(side="left", padx=6, pady=4)
+        canvas.create_window((0, 0), window=scrollable_body, anchor="nw")
 
-        self.sell1_buy2_btn = ttk.Button(
-            actions,
-            text="SELL A1 / BUY A2",
-            command=lambda: self._on_place_mixed("sell", "buy"),
-            state="disabled",
-        )
-        self.sell1_buy2_btn.pack(side="left", padx=6, pady=4)
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
 
-        # Table
+        self._scroll_canvas = canvas
+        self._scrollable_body = scrollable_body
+
+        def _on_mousewheel(event):
+            delta = getattr(event, 'delta', 0)
+            if delta:
+                canvas.yview_scroll(int(-1 * (delta / 120)), "units")
+
+        def _bind_to_mousewheel(widget):
+            widget.bind("<Enter>", lambda _: canvas.bind_all("<MouseWheel>", _on_mousewheel))
+            widget.bind("<Leave>", lambda _: canvas.unbind_all("<MouseWheel>"))
+
+        _bind_to_mousewheel(scrollable_body)
+
+        scrollable_body.columnconfigure(0, weight=1)
+        scrollable_body.columnconfigure(1, weight=1)
+        for row in range(3):
+            scrollable_body.rowconfigure(row, weight=1 if row != 1 else 0)
+
+        active_trades = ttk.LabelFrame(scrollable_body, text="Active Trades")
+        active_trades.grid(row=0, column=0, columnspan=2, sticky="nsew", pady=(0, 12))
+        active_trades.columnconfigure(0, weight=1)
+        active_trades.rowconfigure(0, weight=1)
+
         self.table = ScrollableTable(
-            self.root,
+            active_trades,
             columns=[
                 "Trade ID",
                 "Account 1: Pair",
@@ -365,43 +381,14 @@ class App:
                 "Close (both)",
             ],
         )
-        self.table.pack(fill="both", expand=True, padx=8, pady=8)
+        self.table.grid(row=0, column=0, sticky="nsew")
 
-        self._build_automation_ui()
-        self._update_config_summary()
+        drives_frame = ttk.LabelFrame(scrollable_body, text="Active Drives")
+        drives_frame.grid(row=1, column=0, sticky="nsew", padx=(0, 6), pady=(0, 12))
+        drives_frame.columnconfigure(0, weight=1)
+        drives_frame.rowconfigure(0, weight=1)
 
-    def _build_automation_ui(self) -> None:
-        automation = ttk.LabelFrame(self.root, text="Automation Settings")
-        automation.pack(fill="x", padx=8, pady=(0, 10))
-        for col in range(2):
-            automation.columnconfigure(col, weight=1 if col == 1 else 0)
-
-        summary_frame = ttk.Frame(automation)
-        summary_frame.grid(row=0, column=0, columnspan=2, sticky="ew", padx=6, pady=(6, 2))
-        summary_frame.columnconfigure(0, weight=1)
-        ttk.Label(summary_frame, text="Active Configuration", font=("Segoe UI", 9, "bold")).grid(
-            row=0, column=0, sticky="w"
-        )
-        ttk.Label(
-            summary_frame,
-            textvariable=self.config_summary_var,
-            justify="left",
-            anchor="w",
-            wraplength=880,
-        ).grid(row=1, column=0, sticky="ew", pady=(2, 0))
-
-        ttk.Label(automation, text="Market Timezone").grid(row=1, column=0, sticky="w", padx=6, pady=4)
-        ttk.Entry(automation, textvariable=self.market_timezone_var, width=24).grid(
-            row=1, column=1, sticky="w", padx=6, pady=4
-        )
-
-        automation.rowconfigure(2, weight=1)
-        overview_frame = ttk.LabelFrame(automation, text="Scheduled Trade Overview")
-        overview_frame.grid(row=2, column=0, columnspan=2, sticky="nsew", padx=6, pady=(4, 8))
-        overview_frame.columnconfigure(0, weight=1)
-        overview_frame.rowconfigure(0, weight=1)
-
-        columns = (
+        schedule_columns = (
             "schedule",
             "status",
             "pairs",
@@ -413,10 +400,10 @@ class App:
             "last",
         )
         self.schedule_tree = ttk.Treeview(
-            overview_frame,
-            columns=columns,
+            drives_frame,
+            columns=schedule_columns,
             show="headings",
-            height=6,
+            height=10,
         )
         headings = {
             "schedule": "Schedule",
@@ -429,67 +416,207 @@ class App:
             "next": "Next Run",
             "last": "Last Run",
         }
-        for col in columns:
+        for col in schedule_columns:
             self.schedule_tree.heading(col, text=headings[col])
-            stretch = col in {"schedule", "pairs", "window"}
             width = 140
             if col == "pairs":
                 width = 170
             elif col == "window":
-                width = 150
-            elif col == "schedule":
                 width = 160
+            elif col == "schedule":
+                width = 190
             elif col == "days":
                 width = 110
-            self.schedule_tree.column(col, width=width, stretch=stretch)
+            self.schedule_tree.column(col, width=width, stretch=col in {"schedule", "pairs", "window"})
 
-        schedule_scroll = ttk.Scrollbar(overview_frame, orient="vertical", command=self.schedule_tree.yview)
+        schedule_scroll = ttk.Scrollbar(drives_frame, orient="vertical", command=self.schedule_tree.yview)
         self.schedule_tree.configure(yscrollcommand=schedule_scroll.set)
         self.schedule_tree.grid(row=0, column=0, sticky="nsew")
         schedule_scroll.grid(row=0, column=1, sticky="ns")
 
-        direction_options = [
-            self._direction_key_to_display(key) for key in ("buy_sell", "sell_buy", "buy_buy", "sell_sell")
-        ]
+        config_frame = ttk.LabelFrame(scrollable_body, text="Configuration Snapshot")
+        config_frame.grid(row=1, column=1, sticky="nsew", padx=(6, 0), pady=(0, 12))
+        config_frame.columnconfigure(0, weight=1)
+        config_frame.rowconfigure(0, weight=1)
 
-        row = 3
-        row = self._render_thread_section(
-            automation,
-            row,
-            "Primary Trades",
-            self.config.primary_threads,
-            self.primary_thread_vars,
-            direction_options,
+        self.config_tree = ttk.Treeview(
+            config_frame,
+            columns=("value",),
+            show="tree headings",
+            selectmode="browse",
+            height=10,
         )
-        row = self._render_thread_section(
-            automation,
-            row,
-            "Wednesday Specials",
-            self.config.wednesday_threads,
-            self.wednesday_thread_vars,
-            direction_options,
-        )
+        self.config_tree.heading("#0", text="Item", anchor="w")
+        self.config_tree.heading("value", text="Details", anchor="w")
+        self.config_tree.column("#0", width=220, stretch=True)
+        self.config_tree.column("value", width=260, stretch=True)
 
-        risk_frame = ttk.LabelFrame(automation, text="Risk Controls")
-        risk_frame.grid(row=row, column=0, columnspan=2, sticky="ew", padx=6, pady=4)
-        risk_frame.columnconfigure(1, weight=1)
-        ttk.Checkbutton(risk_frame, text="Enable Drawdown Stop", variable=self.drawdown_enabled_var).grid(
-            row=0, column=0, sticky="w", padx=4, pady=2
-        )
-        ttk.Label(risk_frame, text="Drawdown Stop (%)").grid(row=0, column=1, sticky="e", padx=4, pady=2)
-        ttk.Entry(risk_frame, textvariable=self.drawdown_stop_var, width=10).grid(
-            row=0, column=2, sticky="w", padx=4, pady=2
-        )
+        config_scroll = ttk.Scrollbar(config_frame, orient="vertical", command=self.config_tree.yview)
+        self.config_tree.configure(yscrollcommand=config_scroll.set)
+        self.config_tree.grid(row=0, column=0, sticky="nsew")
+        config_scroll.grid(row=0, column=1, sticky="ns")
 
-        save_frame = ttk.Frame(automation)
-        save_frame.grid(row=row + 1, column=0, columnspan=2, sticky="ew", padx=4, pady=6)
-        save_frame.columnconfigure(0, weight=1)
-        self.automation_status = ttk.Label(save_frame, text="", foreground="#555")
-        self.automation_status.grid(row=0, column=0, sticky="w", padx=4)
-        ttk.Button(save_frame, text="Save Automation Settings", command=self._save_config).grid(
-            row=0, column=1, sticky="e", padx=4
+        config_actions = ttk.Frame(config_frame)
+        config_actions.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        config_actions.columnconfigure(0, weight=1)
+        ttk.Button(
+            config_actions,
+            text="Reload Configuration",
+            command=self._reload_config_from_disk,
+        ).grid(row=0, column=1, sticky="e", padx=(4, 0))
+
+        history_frame = ttk.LabelFrame(scrollable_body, text="Trade History")
+        history_frame.grid(row=2, column=0, columnspan=2, sticky="nsew")
+        history_frame.columnconfigure(0, weight=1)
+        history_frame.rowconfigure(0, weight=1)
+
+        history_columns = (
+            "trade_id",
+            "schedule",
+            "opened",
+            "closed",
+            "p1",
+            "p2",
+            "combined",
         )
-        self.automation_status.configure(text="Loaded saved automation settings.")
+        self.trade_history_tree = ttk.Treeview(
+            history_frame,
+            columns=history_columns,
+            show="headings",
+            height=12,
+        )
+        history_headings = {
+            "trade_id": "Trade ID",
+            "schedule": "Schedule",
+            "opened": "Opened At",
+            "closed": "Closed At",
+            "p1": "Account 1 P/L",
+            "p2": "Account 2 P/L",
+            "combined": "Combined P/L",
+        }
+        for col in history_columns:
+            self.trade_history_tree.heading(col, text=history_headings[col])
+            width = 130
+            if col == "schedule":
+                width = 200
+            elif col == "combined":
+                width = 150
+            self.trade_history_tree.column(col, width=width, stretch=col in {"schedule", "combined"})
+
+        history_scroll = ttk.Scrollbar(history_frame, orient="vertical", command=self.trade_history_tree.yview)
+        self.trade_history_tree.configure(yscrollcommand=history_scroll.set)
+        self.trade_history_tree.grid(row=0, column=0, sticky="nsew")
+        history_scroll.grid(row=0, column=1, sticky="ns")
+
+        _bind_to_mousewheel(self.trade_history_tree)
+        _bind_to_mousewheel(self.schedule_tree)
+        _bind_to_mousewheel(self.config_tree)
+        _bind_to_mousewheel(self.table)
+
+        self._update_config_summary()
+
+    def _populate_trade_history_tree(self) -> None:
+        if not self.trade_history_tree:
+            return
+
+        def _fmt_profit(value) -> str:
+            return f"{float(value):.2f}"
+
+        rows = []
+        for entry in self.trade_history:
+            if not isinstance(entry, dict):
+                continue
+            trade_id = str(entry.get('trade_id', ''))
+            schedule = str(entry.get('schedule', '')) or 'Manual'
+            opened_at = self._fmt_time(int(float(entry.get('opened_at', 0)) or 0))
+            closed_at = self._fmt_time(int(float(entry.get('closed_at', 0)) or 0))
+            account1 = entry.get('account1', {}) if isinstance(entry.get('account1'), dict) else {}
+            account2 = entry.get('account2', {}) if isinstance(entry.get('account2'), dict) else {}
+            p1 = float(account1.get('profit', 0.0) or 0.0)
+            p2 = float(account2.get('profit', 0.0) or 0.0)
+            combined = float(entry.get('combined_profit', p1 + p2) or 0.0)
+            rows.append((trade_id, schedule, opened_at, closed_at, _fmt_profit(p1), _fmt_profit(p2), _fmt_profit(combined)))
+
+        def _update() -> None:
+            tree = self.trade_history_tree
+            tree.delete(*tree.get_children())
+            for values in reversed(rows):
+                tree.insert('', 0, values=values)
+
+        self._invoke_on_ui(_update)
+
+    def _reload_config_from_disk(self) -> None:
+        try:
+            config = self.persistence.get_config()
+        except Exception as exc:
+            messagebox.showerror('Reload Failed', str(exc))
+            return
+        self.config = config
+        primary_default = config.primary_threads[0] if config.primary_threads else _default_primary_threads()[0]
+        self.pair1_var.set(primary_default.symbol1)
+        self.lot1_var.set(self._format_number(primary_default.lot1))
+        self.pair2_var.set(primary_default.symbol2)
+        self.lot2_var.set(self._format_number(primary_default.lot2))
+        self._update_config_summary()
+        self._refresh_schedule_overview(self.state)
+        self._set_automation_status('Configuration reloaded from automation_config.json.', ok=True)
+
+    def _update_config_summary(self) -> None:
+        if not self.config_tree:
+            return
+
+        def _add_thread(parent, thread) -> None:
+            status = 'ENABLED' if thread.enabled else 'Disabled'
+            node = self.config_tree.insert(parent, 'end', text=f"{thread.name} ({thread.thread_id})", values=(status,), open=False)
+            self.config_tree.insert(node, 'end', text='Pairs', values=(f"{thread.symbol1 or '-'} / {thread.symbol2 or '-'}",))
+            self.config_tree.insert(node, 'end', text='Lots', values=(f"{self._format_number(thread.lot1)} / {self._format_number(thread.lot2)}",))
+            self.config_tree.insert(node, 'end', text='Direction', values=(self._direction_key_to_display(thread.direction),))
+            self.config_tree.insert(node, 'end', text='Entry Window', values=(self._format_entry_window(thread),))
+            self.config_tree.insert(node, 'end', text='Weekdays', values=(self._format_weekdays(thread.weekdays),))
+            self.config_tree.insert(node, 'end', text='Max Entry Spread', values=(self._format_number(thread.max_entry_spread),))
+            close_after = self._hours_from_minutes(thread.close_after_minutes)
+            close_text = f"{close_after} h" if close_after != '0' else 'n/a'
+            self.config_tree.insert(node, 'end', text='Close After', values=(close_text,))
+            self.config_tree.insert(node, 'end', text='Max Exit Spread', values=(self._format_number(thread.max_exit_spread),))
+
+        def _update() -> None:
+            tree = self.config_tree
+            tree.delete(*tree.get_children())
+            tree.insert('', 'end', text='Timezone', values=(self.config.timezone or 'UTC',))
+            risk_status = 'Enabled' if self.config.risk.drawdown_enabled else 'Disabled'
+            risk_node = tree.insert('', 'end', text='Risk Controls', values=(risk_status,), open=True)
+            if self.config.risk.drawdown_enabled:
+                tree.insert(risk_node, 'end', text='Drawdown Stop (%)', values=(self._format_number(self.config.risk.drawdown_stop),))
+            primary_root = tree.insert('', 'end', text='Primary Threads', values=('',), open=True)
+            for thread in self.config.primary_threads:
+                _add_thread(primary_root, thread)
+            wednesday_root = tree.insert('', 'end', text='Wednesday Threads', values=('',), open=True)
+            for thread in self.config.wednesday_threads:
+                _add_thread(wednesday_root, thread)
+
+        self._invoke_on_ui(_update)
+
+    def _record_trade_history(self, entry: Dict[str, Any]) -> None:
+        cleaned = dict(entry)
+        cleaned.setdefault('recorded_at', time.time())
+        self.trade_history.append(cleaned)
+        if len(self.trade_history) > self.trade_history_limit:
+            self.trade_history = self.trade_history[-self.trade_history_limit:]
+        if getattr(self, 'state', None) is None:
+            self.state = self.persistence.get_state()
+        self.state.trade_history = [dict(item) for item in self.trade_history]
+        self.persistence.save_state(self.state)
+        self._populate_trade_history_tree()
+
+    def _update_trade_profit_cache(self, trade_id: str, profit1: float, profit2: float) -> None:
+        with self._trade_lock:
+            info = self.paired_trades.get(trade_id)
+            if not info:
+                return
+            if isinstance(info.get('account1'), dict):
+                info['account1']['last_profit'] = float(profit1)
+            if isinstance(info.get('account2'), dict):
+                info['account2']['last_profit'] = float(profit2)
 
     @staticmethod
     def _direction_key_to_display(key: str) -> str:
@@ -524,187 +651,13 @@ class App:
         text = text.rstrip("0").rstrip(".")
         return text or "0"
 
-    def _init_thread_vars(self, threads: Sequence[ThreadSchedule]) -> Dict[str, Dict[str, tk.Variable]]:
-        vars_map: Dict[str, Dict[str, tk.Variable]] = {}
-        for thread in threads:
-            vars_map[thread.thread_id] = {
-                "enabled": tk.BooleanVar(value=thread.enabled),
-                "entry_start": tk.StringVar(value=thread.entry_start),
-                "entry_end": tk.StringVar(value=thread.entry_end),
-                "symbol1": tk.StringVar(value=thread.symbol1),
-                "lot1": tk.StringVar(value=str(thread.lot1)),
-                "symbol2": tk.StringVar(value=thread.symbol2),
-                "lot2": tk.StringVar(value=str(thread.lot2)),
-                "direction": tk.StringVar(value=self._direction_key_to_display(thread.direction)),
-                "max_entry_spread": tk.StringVar(value=self._format_number(thread.max_entry_spread)),
-                "close_after_hours": tk.StringVar(value=self._hours_from_minutes(thread.close_after_minutes)),
-                "max_exit_spread": tk.StringVar(value=self._format_number(thread.max_exit_spread)),
-            }
-        return vars_map
-
-    def _render_thread_section(
-        self,
-        parent: ttk.Misc,
-        row: int,
-        title: str,
-        threads: Sequence[ThreadSchedule],
-        vars_map: Dict[str, Dict[str, tk.Variable]],
-        direction_options: Sequence[str],
-    ) -> int:
-        section = ttk.LabelFrame(parent, text=title)
-        section.grid(row=row, column=0, columnspan=2, sticky="ew", padx=6, pady=4)
-        section.columnconfigure(0, weight=1)
-        for idx, thread in enumerate(threads, start=1):
-            thread_vars = vars_map.get(thread.thread_id)
-            if not thread_vars:
-                continue
-            frame = ttk.LabelFrame(section, text=f"Set {idx}: {thread.name}")
-            frame.grid(row=idx - 1, column=0, sticky="ew", padx=6, pady=4)
-            for col in range(4):
-                frame.columnconfigure(col, weight=1 if col % 2 == 1 else 0)
-            ttk.Checkbutton(frame, text="Enable", variable=thread_vars["enabled"]).grid(
-                row=0, column=0, sticky="w", padx=4, pady=2
-            )
-            ttk.Label(frame, text=f"Thread ID: {thread.thread_id}", foreground="#444").grid(
-                row=0, column=1, columnspan=3, sticky="w", padx=4, pady=2
-            )
-            ttk.Label(frame, text="Entry Start (HH:MM)").grid(row=1, column=0, sticky="e", padx=4, pady=2)
-            ttk.Entry(frame, textvariable=thread_vars["entry_start"], width=10).grid(
-                row=1, column=1, sticky="w", padx=4, pady=2
-            )
-            ttk.Label(frame, text="Entry End (HH:MM)").grid(row=1, column=2, sticky="e", padx=4, pady=2)
-            ttk.Entry(frame, textvariable=thread_vars["entry_end"], width=10).grid(
-                row=1, column=3, sticky="w", padx=4, pady=2
-            )
-            ttk.Label(frame, text="Symbol A1").grid(row=2, column=0, sticky="e", padx=4, pady=2)
-            ttk.Entry(frame, textvariable=thread_vars["symbol1"], width=14).grid(
-                row=2, column=1, sticky="w", padx=4, pady=2
-            )
-            ttk.Label(frame, text="Lot A1").grid(row=2, column=2, sticky="e", padx=4, pady=2)
-            ttk.Entry(frame, textvariable=thread_vars["lot1"], width=10).grid(
-                row=2, column=3, sticky="w", padx=4, pady=2
-            )
-            ttk.Label(frame, text="Symbol A2").grid(row=3, column=0, sticky="e", padx=4, pady=2)
-            ttk.Entry(frame, textvariable=thread_vars["symbol2"], width=14).grid(
-                row=3, column=1, sticky="w", padx=4, pady=2
-            )
-            ttk.Label(frame, text="Lot A2").grid(row=3, column=2, sticky="e", padx=4, pady=2)
-            ttk.Entry(frame, textvariable=thread_vars["lot2"], width=10).grid(
-                row=3, column=3, sticky="w", padx=4, pady=2
-            )
-            ttk.Label(frame, text="Direction").grid(row=4, column=0, sticky="e", padx=4, pady=2)
-            ttk.Combobox(
-                frame,
-                textvariable=thread_vars["direction"],
-                values=direction_options,
-                state="readonly",
-                width=14,
-            ).grid(row=4, column=1, sticky="w", padx=4, pady=2)
-            ttk.Label(frame, text="Max Entry Spread").grid(row=4, column=2, sticky="e", padx=4, pady=2)
-            ttk.Entry(frame, textvariable=thread_vars["max_entry_spread"], width=10).grid(
-                row=4, column=3, sticky="w", padx=4, pady=2
-            )
-            ttk.Label(frame, text="Close After (hours)").grid(row=5, column=0, sticky="e", padx=4, pady=2)
-            ttk.Entry(frame, textvariable=thread_vars["close_after_hours"], width=10).grid(
-                row=5, column=1, sticky="w", padx=4, pady=2
-            )
-            ttk.Label(frame, text="Max Exit Spread").grid(row=5, column=2, sticky="e", padx=4, pady=2)
-            ttk.Entry(frame, textvariable=thread_vars["max_exit_spread"], width=10).grid(
-                row=5, column=3, sticky="w", padx=4, pady=2
-            )
-        return row + 1
-
-    def _threads_from_vars(
-        self,
-        templates: Sequence[ThreadSchedule],
-        vars_map: Dict[str, Dict[str, tk.Variable]],
-    ) -> list[ThreadSchedule]:
-        threads: list[ThreadSchedule] = []
-        for template in templates:
-            vars = vars_map.get(template.thread_id)
-            if not vars:
-                threads.append(template)
-                continue
-            try:
-                lot1 = float(vars["lot1"].get().strip() or 0.0)
-                lot2 = float(vars["lot2"].get().strip() or 0.0)
-                max_entry_spread = float(vars["max_entry_spread"].get().strip() or 0.0)
-                close_after_minutes = self._minutes_from_hours(vars["close_after_hours"].get())
-                max_exit_spread = float(vars["max_exit_spread"].get().strip() or 0.0)
-            except ValueError as exc:
-                raise ValueError(f"{template.name}: {exc}") from exc
-
-            threads.append(
-                ThreadSchedule(
-                    thread_id=template.thread_id,
-                    name=template.name,
-                    enabled=bool(vars["enabled"].get()),
-                    entry_start=vars["entry_start"].get().strip(),
-                    entry_end=vars["entry_end"].get().strip(),
-                    symbol1=vars["symbol1"].get().strip(),
-                    symbol2=vars["symbol2"].get().strip(),
-                    lot1=lot1,
-                    lot2=lot2,
-                    direction=self._direction_display_to_key(vars["direction"].get()),
-                    max_entry_spread=max_entry_spread,
-                    close_after_minutes=close_after_minutes,
-                    max_exit_spread=max_exit_spread,
-                    weekdays=list(template.weekdays),
-                )
-            )
-        return threads
-
-    def _apply_thread_to_vars(self, thread: ThreadSchedule, vars: Dict[str, tk.Variable]) -> None:
-        vars["enabled"].set(thread.enabled)
-        vars["entry_start"].set(thread.entry_start)
-        vars["entry_end"].set(thread.entry_end)
-        vars["symbol1"].set(thread.symbol1)
-        vars["lot1"].set(self._format_number(thread.lot1))
-        vars["symbol2"].set(thread.symbol2)
-        vars["lot2"].set(self._format_number(thread.lot2))
-        vars["direction"].set(self._direction_key_to_display(thread.direction))
-        vars["max_entry_spread"].set(self._format_number(thread.max_entry_spread))
-        vars["close_after_hours"].set(self._hours_from_minutes(thread.close_after_minutes))
-        vars["max_exit_spread"].set(self._format_number(thread.max_exit_spread))
-
-    def _thread_summary_line(self, thread: ThreadSchedule) -> str:
-        status = "ENABLED" if thread.enabled else "disabled"
-        direction = self._direction_key_to_display(thread.direction)
-        pair_desc = f"{thread.symbol1 or '-'} / {thread.symbol2 or '-'} ({direction})"
-        if thread.entry_start and thread.entry_end:
-            window = f"{thread.entry_start} - {thread.entry_end}"
-        elif thread.entry_start:
-            window = f"from {thread.entry_start}"
-        elif thread.entry_end:
-            window = f"until {thread.entry_end}"
-        else:
-            window = "no window"
-        lots = f"{self._format_number(thread.lot1)} / {self._format_number(thread.lot2)}"
-        hours = self._hours_from_minutes(thread.close_after_minutes)
-        close_info = f"{hours}h" if thread.close_after_minutes > 0 else "n/a"
-        entry_spread = self._format_number(thread.max_entry_spread)
-        exit_spread = self._format_number(thread.max_exit_spread)
-        return (
-            f"{thread.name} ({thread.thread_id}) [{status}] {pair_desc} | lots {lots} | "
-            f"entry window {window} | entry spread ≤ {entry_spread} | "
-            f"close after {close_info}, exit spread ≤ {exit_spread}"
-        )
-
-    def _update_config_summary(self) -> None:
-        lines = [f"Timezone: {self.config.timezone or 'UTC'}"]
-        lines.append("Primary Threads:")
-        for thread in self.config.primary_threads:
-            lines.append(f"  • {self._thread_summary_line(thread)}")
-        lines.append("Wednesday Threads:")
-        for thread in self.config.wednesday_threads:
-            lines.append(f"  • {self._thread_summary_line(thread)}")
-        self.config_summary_var.set("\n".join(lines))
-
     def _refresh_schedule_overview(self, state: Optional[AutomationState] = None) -> None:
         if not hasattr(self, "schedule_tree"):
             return
         if state is None:
-            state = self.persistence.get_state()
+            state = getattr(self, 'state', None)
+            if state is None:
+                state = self.persistence.get_state()
         tz_name = self.config.timezone or "UTC"
         try:
             tz = ZoneInfo(tz_name)
@@ -722,6 +675,16 @@ class App:
         self._invoke_on_ui(_update_tree)
 
     def on_state_updated(self, state: AutomationState) -> None:
+        self.state = state
+        incoming_history = []
+        for entry in getattr(state, 'trade_history', []):
+            if isinstance(entry, dict):
+                incoming_history.append(dict(entry))
+        if incoming_history and incoming_history != self.trade_history:
+            if len(incoming_history) > self.trade_history_limit:
+                incoming_history = incoming_history[-self.trade_history_limit:]
+            self.trade_history = incoming_history
+            self._populate_trade_history_tree()
         self._refresh_schedule_overview(state)
 
     def _schedule_overview_row(
@@ -839,62 +802,16 @@ class App:
         }
         return mapping.get((key or "buy_sell").lower(), ("buy", "sell"))
 
-    def _collect_config_from_ui(self) -> Optional[AppConfig]:
-        try:
-            primary_threads = self._threads_from_vars(self.config.primary_threads, self.primary_thread_vars)
-            wednesday_threads = self._threads_from_vars(
-                self.config.wednesday_threads, self.wednesday_thread_vars
-            )
-            risk = RiskConfig(
-                drawdown_enabled=bool(self.drawdown_enabled_var.get()),
-                drawdown_stop=float(self.drawdown_stop_var.get().strip() or 0.0),
-            )
-        except ValueError as exc:
-            self._set_automation_status(f"Invalid automation settings: {exc}", ok=False)
-            return None
-
-        tz = self.market_timezone_var.get().strip() or "UTC"
-        config = AppConfig(
-            timezone=tz,
-            primary_threads=primary_threads,
-            wednesday_threads=wednesday_threads,
-            risk=risk,
-        )
-        return config
-
-    def _save_config(self) -> None:
-        config = self._collect_config_from_ui()
-        if not config:
-            return
-        self.config = config
-        self.persistence.save_config(config)
-        self._set_automation_status("Automation settings saved.", ok=True)
-        # Refresh manual entry defaults
-        primary_default = config.primary_threads[0] if config.primary_threads else None
-        if primary_default:
-            self.pair1_var.set(primary_default.symbol1)
-            self.lot1_var.set(self._format_number(primary_default.lot1))
-            self.pair2_var.set(primary_default.symbol2)
-            self.lot2_var.set(self._format_number(primary_default.lot2))
-
-        for thread in config.primary_threads:
-            vars = self.primary_thread_vars.get(thread.thread_id)
-            if vars:
-                self._apply_thread_to_vars(thread, vars)
-        for thread in config.wednesday_threads:
-            vars = self.wednesday_thread_vars.get(thread.thread_id)
-            if vars:
-                self._apply_thread_to_vars(thread, vars)
-
-        self.market_timezone_var.set(config.timezone or "UTC")
-        self.drawdown_enabled_var.set(config.risk.drawdown_enabled)
-        self.drawdown_stop_var.set(self._format_number(config.risk.drawdown_stop))
-        self._update_config_summary()
-        self._refresh_schedule_overview()
-
     def _set_automation_status(self, message: str, ok: bool = True) -> None:
         color = "#070" if ok else "#b00"
-        self._invoke_on_ui(lambda: self.automation_status.configure(text=message, foreground=color))
+        label = getattr(self, 'automation_status_label', None)
+        if not label:
+            return
+
+        def _update() -> None:
+            label.configure(text=message, foreground=color)
+
+        self._invoke_on_ui(_update)
 
     def _invoke_on_ui(self, func) -> None:
         try:
@@ -985,8 +902,8 @@ class App:
             raise RuntimeError("Failed to obtain position tickets for both accounts.")
 
         entry = {
-            "account1": {"symbol": symbol1, "lot": float(lot1), "side": side1, "position": pos1, "magic": magic1},
-            "account2": {"symbol": symbol2, "lot": float(lot2), "side": side2, "position": pos2, "magic": magic2},
+            "account1": {"symbol": symbol1, "lot": float(lot1), "side": side1, "position": pos1, "magic": magic1, "last_profit": 0.0},
+            "account2": {"symbol": symbol2, "lot": float(lot2), "side": side2, "position": pos2, "magic": magic2, "last_profit": 0.0},
             "schedule": schedule_name or "manual",
             "thread_id": schedule_thread_id,
             "opened_at": time.time(),
@@ -999,6 +916,13 @@ class App:
         eprice2 = r2.get("entry_price")
         etime1 = r1.get("entry_time") or 0
         etime2 = r2.get("entry_time") or 0
+
+        if isinstance(eprice1, (int, float)):
+            entry["account1"]["entry_price"] = float(eprice1)
+        if isinstance(eprice2, (int, float)):
+            entry["account2"]["entry_price"] = float(eprice2)
+        entry["account1"]["entry_time"] = int(etime1) if etime1 else 0
+        entry["account2"]["entry_time"] = int(etime2) if etime2 else 0
 
         self.table.add_row(
             trade_id,
@@ -1171,10 +1095,12 @@ class App:
             self.connected2 = True
             self.status1.configure(text="connected", foreground="#070")
             self.status2.configure(text="connected", foreground="#070")
-            self.buy_btn.configure(state="normal")
-            self.sell_btn.configure(state="normal")
-            self.buy1_sell2_btn.configure(state="normal")
-            self.sell1_buy2_btn.configure(state="normal")
+            login1 = d1.get('login') or 'Account 1'
+            login2 = d2.get('login') or 'Account 2'
+            server1 = d1.get('server') or ''
+            server2 = d2.get('server') or ''
+            msg = f"Connected: {login1}{'@' + server1 if server1 else ''} | {login2}{'@' + server2 if server2 else ''}"
+            self._set_automation_status(msg, ok=True)
         except Exception as e:
             messagebox.showerror("Connection Failed", str(e))
             self._cleanup_workers()
@@ -1202,21 +1128,74 @@ class App:
             info = self.paired_trades.get(trade_id)
         if not info:
             return
-        a1 = info["account1"]
-        a2 = info["account2"]
+
+        account1_src = info.get('account1', {}) or {}
+        account2_src = info.get('account2', {}) or {}
+        account1 = dict(account1_src)
+        account2 = dict(account2_src)
+
+        p1_profit = float(account1.get('last_profit', 0.0) or 0.0)
+        p2_profit = float(account2.get('last_profit', 0.0) or 0.0)
+        if self.worker1 and account1_src.get('position'):
+            try:
+                res1 = self.worker1.get_profit(account1_src['position'])
+                p1_profit = float(res1.get('profit', p1_profit))
+            except Exception:
+                pass
+        if self.worker2 and account2_src.get('position'):
+            try:
+                res2 = self.worker2.get_profit(account2_src['position'])
+                p2_profit = float(res2.get('profit', p2_profit))
+            except Exception:
+                pass
+
+        account1.pop('last_profit', None)
+        account2.pop('last_profit', None)
+        close_time = time.time()
+        account1['profit'] = p1_profit
+        account2['profit'] = p2_profit
+
+        history_entry = {
+            'trade_id': trade_id,
+            'schedule': info.get('schedule'),
+            'thread_id': info.get('thread_id'),
+            'opened_at': float(info.get('opened_at', 0.0) or 0.0),
+            'closed_at': close_time,
+            'account1': account1,
+            'account2': account2,
+            'combined_profit': p1_profit + p2_profit,
+        }
 
         try:
             with ThreadPoolExecutor(max_workers=2) as ex:
-                f1 = ex.submit(self.worker1.close, a1["position"], a1["symbol"], a1["side"], a1["lot"], a1["magic"])
-                f2 = ex.submit(self.worker2.close, a2["position"], a2["symbol"], a2["side"], a2["lot"], a2["magic"])
-                f1.result(timeout=20)
-                f2.result(timeout=20)
-            # Remove UI row and internal state
+                futures = []
+                if self.worker1 and account1_src.get('position'):
+                    futures.append(ex.submit(
+                        self.worker1.close,
+                        account1_src.get('position'),
+                        account1_src.get('symbol'),
+                        account1_src.get('side'),
+                        account1_src.get('lot'),
+                        account1_src.get('magic'),
+                    ))
+                if self.worker2 and account2_src.get('position'):
+                    futures.append(ex.submit(
+                        self.worker2.close,
+                        account2_src.get('position'),
+                        account2_src.get('symbol'),
+                        account2_src.get('side'),
+                        account2_src.get('lot'),
+                        account2_src.get('magic'),
+                    ))
+                for future in futures:
+                    future.result(timeout=20)
             self.table.remove_row(trade_id)
             with self._trade_lock:
                 self.paired_trades.pop(trade_id, None)
+            self._record_trade_history(history_entry)
         except Exception as e:
-            messagebox.showerror("Close Error", str(e))
+            messagebox.showerror('Close Error', str(e))
+
 
     def _schedule_profit_updates(self) -> None:
         self.root.after(800, self._update_profits)
@@ -1226,28 +1205,47 @@ class App:
             with self._trade_lock:
                 snapshot = {tid: dict(info) for tid, info in self.paired_trades.items()}
             for trade_id, info in snapshot.items():
-                a1 = info["account1"]
-                a2 = info["account2"]
+                a1 = info.get("account1", {}) or {}
+                a2 = info.get("account2", {}) or {}
                 try:
-                    p1 = self.worker1.get_profit(a1["position"]) if self.worker1 else {"open": False, "profit": 0.0}
-                    p2 = self.worker2.get_profit(a2["position"]) if self.worker2 else {"open": False, "profit": 0.0}
+                    p1 = self.worker1.get_profit(a1.get("position")) if self.worker1 and a1.get("position") else {"open": False, "profit": a1.get("last_profit", 0.0)}
                 except Exception:
-                    p1 = {"open": False, "profit": 0.0}
-                    p2 = {"open": False, "profit": 0.0}
+                    p1 = {"open": False, "profit": a1.get("last_profit", 0.0)}
+                try:
+                    p2 = self.worker2.get_profit(a2.get("position")) if self.worker2 and a2.get("position") else {"open": False, "profit": a2.get("last_profit", 0.0)}
+                except Exception:
+                    p2 = {"open": False, "profit": a2.get("last_profit", 0.0)}
 
-                total = float(p1.get("profit", 0.0)) + float(p2.get("profit", 0.0))
-                self.table.set_profits(
-                    trade_id,
-                    float(p1.get("profit", 0.0)),
-                    float(p2.get("profit", 0.0)),
-                    total,
-                )
+                p1_profit = float(p1.get("profit", 0.0) or 0.0)
+                p2_profit = float(p2.get("profit", 0.0) or 0.0)
+                total = p1_profit + p2_profit
+                self._update_trade_profit_cache(trade_id, p1_profit, p2_profit)
+                self.table.set_profits(trade_id, p1_profit, p2_profit, total)
 
-                # If both closed externally, remove row
                 if not p1.get("open") and not p2.get("open"):
-                    self.table.remove_row(trade_id)
                     with self._trade_lock:
-                        self.paired_trades.pop(trade_id, None)
+                        original = self.paired_trades.pop(trade_id, None)
+                    self.table.remove_row(trade_id)
+                    if original:
+                        account1_entry = dict(original.get("account1", {}) or {})
+                        account2_entry = dict(original.get("account2", {}) or {})
+                        profit1 = float(account1_entry.get("last_profit", p1_profit) or 0.0)
+                        profit2 = float(account2_entry.get("last_profit", p2_profit) or 0.0)
+                        account1_entry.pop("last_profit", None)
+                        account2_entry.pop("last_profit", None)
+                        account1_entry["profit"] = profit1
+                        account2_entry["profit"] = profit2
+                        history_entry = {
+                            "trade_id": trade_id,
+                            "schedule": original.get("schedule"),
+                            "thread_id": original.get("thread_id"),
+                            "opened_at": float(original.get("opened_at", 0.0) or 0.0),
+                            "closed_at": time.time(),
+                            "account1": account1_entry,
+                            "account2": account2_entry,
+                            "combined_profit": account1_entry["profit"] + account2_entry["profit"],
+                        }
+                        self._record_trade_history(history_entry)
         finally:
             self._schedule_profit_updates()
 
@@ -1262,10 +1260,9 @@ class App:
         self.worker2 = None
         self.connected1 = False
         self.connected2 = False
-        self.buy_btn.configure(state="disabled")
-        self.sell_btn.configure(state="disabled")
         self.status1.configure(text="disconnected", foreground="#b00")
         self.status2.configure(text="disconnected", foreground="#b00")
+        self._set_automation_status("Disconnected from terminals.", ok=False)
 
     def on_close(self) -> None:
         self.automation_runner.stop()

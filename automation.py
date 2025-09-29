@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta
-from typing import Dict, Iterable, List, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 
 def _default_primary_weekdays() -> List[int]:
@@ -224,15 +224,25 @@ class AppConfig:
 @dataclass
 class AutomationState:
     last_runs: Dict[str, str] = field(default_factory=dict)
+    trade_history: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, object]:
-        return {"last_runs": dict(self.last_runs)}
+        return {"last_runs": dict(self.last_runs), "trade_history": [dict(entry) for entry in self.trade_history]}
 
     @classmethod
     def from_dict(cls, data: Optional[Dict[str, object]]) -> "AutomationState":
         data = data or {}
         lr = data.get("last_runs") or {}
-        return cls(last_runs={str(k): str(v) for k, v in lr.items()})
+        raw_history = data.get("trade_history") or []
+        history: List[Dict[str, Any]] = []
+        if isinstance(raw_history, list):
+            for item in raw_history:
+                if isinstance(item, dict):
+                    history.append({str(k): item[k] for k in item.keys()})
+        return cls(
+            last_runs={str(k): str(v) for k, v in lr.items()},
+            trade_history=history,
+        )
 
 
 @dataclass
