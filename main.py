@@ -1658,6 +1658,11 @@ class App:
         self.root.after(800, self._update_profits)
 
     def _update_profits(self) -> None:
+        """
+        Periodically refresh live profit, commission, and swap metrics for all active paired trades and reconcile closed trades into history.
+        
+        Fetches current profit/commission/swap for each side when available, computes combined metrics, updates the internal per-trade profit cache and the UI table, and removes trades that are no longer open. When a trade is removed, creates and records a finalized history entry containing per-account and combined results. Always refreshes account summaries and schedules the next profit update.
+        """
         try:
             with self._trade_lock:
                 snapshot = {tid: dict(info) for tid, info in self.paired_trades.items()}
