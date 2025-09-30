@@ -353,6 +353,19 @@ def trades_due_for_close(
     now: datetime,
     spreads: Dict[str, float],
 ) -> List[str]:
+    """
+    Determine which tracked trades are eligible to be closed at the given time.
+    
+    Each trade is eligible if its required minimum hold time (from `close_after_minutes`) has elapsed and, when `max_exit_spread` is greater than zero, every symbol in the trade has a known spread that is less than or equal to `max_exit_spread`. Trades with nonpositive `close_after_minutes` are treated as having no hold requirement. Trades missing any symbol spread are not eligible when an exit-spread limit is enforced.
+    
+    Parameters:
+        trades (Iterable[TrackedTrade]): Tracked trades to evaluate.
+        now (datetime): Current timestamp used to compare against each trade's `opened_at`.
+        spreads (Dict[str, float]): Mapping of symbol to current spread.
+    
+    Returns:
+        List[str]: List of trade IDs that meet the closing criteria.
+    """
     to_close: List[str] = []
     for trade in trades:
         min_hold_minutes = max(int(trade.close_after_minutes), 0)
