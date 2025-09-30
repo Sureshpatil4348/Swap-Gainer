@@ -80,6 +80,28 @@ class AutomationLogicTests(unittest.TestCase):
         spreads["USDJPY"] = 1.0
         self.assertFalse(spreads_within_entry_limit(["EURUSD", "USDJPY"], spreads, 0.8))
 
+    def test_duplicate_thread_ids_become_unique(self) -> None:
+        data = {
+            "timezone": "UTC",
+            "primary_threads": [
+                {"thread_id": "primary-dup", "name": "Primary One", "enabled": True, "symbol1": "EURUSD"},
+                {"thread_id": "primary-dup", "name": "Primary Two", "enabled": True, "symbol1": "USDJPY"},
+            ],
+            "wednesday_threads": [
+                {"thread_id": "wed-dup", "name": "Wed One", "enabled": True, "symbol1": "GBPUSD"},
+                {"thread_id": "wed-dup", "name": "Wed Two", "enabled": False, "symbol1": "AUDUSD"},
+            ],
+        }
+
+        config = AppConfig.from_dict(data)
+        primary_ids = [thread.thread_id for thread in config.primary_threads]
+        wednesday_ids = [thread.thread_id for thread in config.wednesday_threads]
+
+        self.assertEqual(len(primary_ids), len(set(primary_ids)))
+        self.assertEqual(len(wednesday_ids), len(set(wednesday_ids)))
+        self.assertTrue(all(thread.thread_id for thread in config.primary_threads))
+        self.assertTrue(all(thread.thread_id for thread in config.wednesday_threads))
+
 
 if __name__ == "__main__":
     unittest.main()

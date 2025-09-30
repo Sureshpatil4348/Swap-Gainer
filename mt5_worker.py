@@ -159,12 +159,16 @@ def _submit_market_order(
     # Fetch position details for entry price/time
     entry_price = None
     entry_time = None
+    commission = 0.0
+    swap = 0.0
     try:
         pos_det = MT5.positions_get(ticket=int(position_ticket))
         if pos_det:
             pos0 = pos_det[0]
             entry_price = float(getattr(pos0, "price_open", 0.0) or 0.0)
             entry_time = int(getattr(pos0, "time", 0) or 0)
+            commission = float(getattr(pos0, "commission", 0.0) or 0.0)
+            swap = float(getattr(pos0, "swap", 0.0) or 0.0)
     except Exception:
         pass
 
@@ -175,6 +179,8 @@ def _submit_market_order(
         "volume": float(volume),
         "entry_price": entry_price,
         "entry_time": entry_time,
+        "commission": commission,
+        "swap": swap,
     }
 
 
@@ -226,6 +232,8 @@ def _get_profit_by_ticket(position_ticket: int) -> Tuple[bool, Dict[str, Any]]:
             "volume": float(getattr(pos, "volume", 0.0) or 0.0),
             "entry_price": float(getattr(pos, "price_open", 0.0) or 0.0),
             "entry_time": int(getattr(pos, "time", 0) or 0),
+            "commission": float(getattr(pos, "commission", 0.0) or 0.0),
+            "swap": float(getattr(pos, "swap", 0.0) or 0.0),
         }
     return True, {"open": False, "profit": 0.0}
 
