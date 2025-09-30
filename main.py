@@ -1,3 +1,4 @@
+import csv
 import os
 import sys
 import uuid
@@ -140,26 +141,22 @@ class ScrollableTable(ttk.Frame):
         self._next_row = 1
         self._rows: Dict[str, Dict[str, Any]] = {}
 
-    def add_row(self, row_id: str, values: list[Any], dynamic_indices: Dict[str, int], close_callback) -> None:
+    def add_row(
+        self,
+        row_id: str,
+        values: list[Any],
+        dynamic_fields: Dict[str, int],
+        close_callback,
+    ) -> None:
         widgets = []
-        p1_idx = dynamic_indices.get("p1", -1)
-        p2_idx = dynamic_indices.get("p2", -1)
-        combined_idx = dynamic_indices.get("combined", -1)
-
-        p1_label = None
-        p2_label = None
-        combined_label = None
+        dynamic_labels: Dict[str, ttk.Label] = {}
+        index_to_key = {idx: key for key, idx in dynamic_fields.items()}
 
         for c, val in enumerate(values[:-1]):  # except last column (Close button)
-            if c in (p1_idx, p2_idx, combined_idx):
+            if c in index_to_key:
                 lbl = ttk.Label(self.inner, text=str(val))
                 lbl.grid(row=self._next_row, column=c, sticky="nsew", padx=4, pady=2)
-                if c == p1_idx:
-                    p1_label = lbl
-                elif c == p2_idx:
-                    p2_label = lbl
-                else:
-                    combined_label = lbl
+                dynamic_labels[index_to_key[c]] = lbl
                 widgets.append(lbl)
             else:
                 w = ttk.Label(self.inner, text=str(val))
@@ -172,24 +169,24 @@ class ScrollableTable(ttk.Frame):
 
         self._rows[row_id] = {
             "widgets": widgets,
-            "p1_label": p1_label,
-            "p2_label": p2_label,
-            "combined_label": combined_label,
+            "dynamic_labels": dynamic_labels,
             "button": btn,
             "row_index": self._next_row,
         }
         self._next_row += 1
 
-    def set_profits(self, row_id: str, p1: float, p2: float, combined: float) -> None:
+    def set_metrics(self, row_id: str, metrics: Dict[str, float]) -> None:
         row = self._rows.get(row_id)
         if not row:
             return
-        if row.get("p1_label"):
-            row["p1_label"].configure(text=f"{p1:.2f}")
-        if row.get("p2_label"):
-            row["p2_label"].configure(text=f"{p2:.2f}")
-        if row.get("combined_label"):
-            row["combined_label"].configure(text=f"{combined:.2f}")
+        dynamic_labels: Dict[str, ttk.Label] = row.get("dynamic_labels", {}) or {}
+        for key, value in metrics.items():
+            label = dynamic_labels.get(key)
+            if label is not None:
+                try:
+                    label.configure(text=f"{float(value):.2f}")
+                except Exception:
+                    label.configure(text=str(value))
 
     def remove_row(self, row_id: str) -> None:
         row = self._rows.pop(row_id, None)
@@ -197,8 +194,11 @@ class ScrollableTable(ttk.Frame):
             return
         for w in row.get("widgets", []):
             w.destroy()
-        if row.get("profit_label"):
-            row["profit_label"].destroy()
+        for lbl in row.get("dynamic_labels", {}).values():
+            try:
+                lbl.destroy()
+            except Exception:
+                pass
         if row.get("button"):
             row["button"].destroy()
 
@@ -265,6 +265,8 @@ class App:
         self.state = self.persistence.get_state()
         self.trade_history: list[Dict[str, Any]] = []
         self.trade_history_limit = 250
+        self.history_csv_path = Path("trade_history.csv")
+        self._history_export_lock = threading.Lock()
         for entry in getattr(self.state, "trade_history", []):
             if isinstance(entry, dict):
                 self.trade_history.append(dict(entry))
@@ -370,13 +372,19 @@ class App:
                 "Account 1: Lot",
                 "Account 1: Entry Price",
                 "Account 1: Entry Time",
+                "Account 1: Commission",
+                "Account 1: Swap",
                 "Account 1: P/L",
                 "Account 2: Pair",
                 "Account 2: Lot",
                 "Account 2: Entry Price",
                 "Account 2: Entry Time",
+                "Account 2: Commission",
+                "Account 2: Swap",
                 "Account 2: P/L",
                 "Side (Buy/Sell)",
+                "Combined Commission",
+                "Combined Swap",
                 "Combined Net Profit",
                 "Close (both)",
             ],
@@ -476,7 +484,13 @@ class App:
             "opened",
             "closed",
             "p1",
+            "p1_commission",
+            "p1_swap",
             "p2",
+            "p2_commission",
+            "p2_swap",
+            "combined_commission",
+            "combined_swap",
             "combined",
         )
         self.trade_history_tree = ttk.Treeview(
@@ -491,7 +505,13 @@ class App:
             "opened": "Opened At",
             "closed": "Closed At",
             "p1": "Account 1 P/L",
+            "p1_commission": "Account 1 Commission",
+            "p1_swap": "Account 1 Swap",
             "p2": "Account 2 P/L",
+            "p2_commission": "Account 2 Commission",
+            "p2_swap": "Account 2 Swap",
+            "combined_commission": "Combined Commission",
+            "combined_swap": "Combined Swap",
             "combined": "Combined P/L",
         }
         for col in history_columns:
@@ -499,7 +519,7 @@ class App:
             width = 130
             if col == "schedule":
                 width = 200
-            elif col == "combined":
+            elif col in {"combined", "combined_commission", "combined_swap"}:
                 width = 150
             self.trade_history_tree.column(col, width=width, stretch=col in {"schedule", "combined"})
 
@@ -533,9 +553,31 @@ class App:
             account1 = entry.get('account1', {}) if isinstance(entry.get('account1'), dict) else {}
             account2 = entry.get('account2', {}) if isinstance(entry.get('account2'), dict) else {}
             p1 = float(account1.get('profit', 0.0) or 0.0)
+            p1_commission = float(account1.get('commission', 0.0) or 0.0)
+            p1_swap = float(account1.get('swap', 0.0) or 0.0)
             p2 = float(account2.get('profit', 0.0) or 0.0)
+            p2_commission = float(account2.get('commission', 0.0) or 0.0)
+            p2_swap = float(account2.get('swap', 0.0) or 0.0)
             combined = float(entry.get('combined_profit', p1 + p2) or 0.0)
-            rows.append((trade_id, schedule, opened_at, closed_at, _fmt_profit(p1), _fmt_profit(p2), _fmt_profit(combined)))
+            combined_commission = float(entry.get('combined_commission', p1_commission + p2_commission) or 0.0)
+            combined_swap = float(entry.get('combined_swap', p1_swap + p2_swap) or 0.0)
+            rows.append(
+                (
+                    trade_id,
+                    schedule,
+                    opened_at,
+                    closed_at,
+                    _fmt_profit(p1),
+                    _fmt_profit(p1_commission),
+                    _fmt_profit(p1_swap),
+                    _fmt_profit(p2),
+                    _fmt_profit(p2_commission),
+                    _fmt_profit(p2_swap),
+                    _fmt_profit(combined_commission),
+                    _fmt_profit(combined_swap),
+                    _fmt_profit(combined),
+                )
+            )
 
         def _update() -> None:
             tree = self.trade_history_tree
@@ -607,16 +649,123 @@ class App:
         self.state.trade_history = [dict(item) for item in self.trade_history]
         self.persistence.save_state(self.state)
         self._populate_trade_history_tree()
+        self._export_trade_history_csv()
 
-    def _update_trade_profit_cache(self, trade_id: str, profit1: float, profit2: float) -> None:
+    def _export_trade_history_csv(self) -> None:
+        headers = [
+            "trade_id",
+            "schedule",
+            "thread_id",
+            "opened_at",
+            "closed_at",
+            "account1_symbol",
+            "account1_lot",
+            "account1_side",
+            "account1_entry_price",
+            "account1_entry_time",
+            "account1_profit",
+            "account1_commission",
+            "account1_swap",
+            "account2_symbol",
+            "account2_lot",
+            "account2_side",
+            "account2_entry_price",
+            "account2_entry_time",
+            "account2_profit",
+            "account2_commission",
+            "account2_swap",
+            "combined_profit",
+            "combined_commission",
+            "combined_swap",
+        ]
+
+        def _fmt_ts(ts_value: Any) -> str:
+            try:
+                ts_float = float(ts_value)
+            except Exception:
+                return ""
+            if ts_float <= 0:
+                return ""
+            try:
+                dt = datetime.fromtimestamp(ts_float)
+                return dt.strftime("%Y-%m-%d %H:%M:%S")
+            except Exception:
+                return ""
+
+        rows: list[Dict[str, Any]] = []
+        for entry in self.trade_history:
+            if not isinstance(entry, dict):
+                continue
+            account1 = entry.get('account1', {}) if isinstance(entry.get('account1'), dict) else {}
+            account2 = entry.get('account2', {}) if isinstance(entry.get('account2'), dict) else {}
+            rows.append({
+                "trade_id": entry.get('trade_id', ''),
+                "schedule": entry.get('schedule', ''),
+                "thread_id": entry.get('thread_id', ''),
+                "opened_at": _fmt_ts(entry.get('opened_at', 0.0)),
+                "closed_at": _fmt_ts(entry.get('closed_at', 0.0)),
+                "account1_symbol": account1.get('symbol', ''),
+                "account1_lot": account1.get('lot', ''),
+                "account1_side": account1.get('side', ''),
+                "account1_entry_price": account1.get('entry_price', ''),
+                "account1_entry_time": _fmt_ts(account1.get('entry_time', 0.0)),
+                "account1_profit": account1.get('profit', 0.0),
+                "account1_commission": account1.get('commission', 0.0),
+                "account1_swap": account1.get('swap', 0.0),
+                "account2_symbol": account2.get('symbol', ''),
+                "account2_lot": account2.get('lot', ''),
+                "account2_side": account2.get('side', ''),
+                "account2_entry_price": account2.get('entry_price', ''),
+                "account2_entry_time": _fmt_ts(account2.get('entry_time', 0.0)),
+                "account2_profit": account2.get('profit', 0.0),
+                "account2_commission": account2.get('commission', 0.0),
+                "account2_swap": account2.get('swap', 0.0),
+                "combined_profit": entry.get('combined_profit', 0.0),
+                "combined_commission": entry.get('combined_commission', 0.0),
+                "combined_swap": entry.get('combined_swap', 0.0),
+            })
+
+        try:
+            with self._history_export_lock:
+                parent = self.history_csv_path.parent
+                if parent not in (None, Path('.')):
+                    parent.mkdir(parents=True, exist_ok=True)
+                with self.history_csv_path.open('w', newline='', encoding='utf-8') as fh:
+                    writer = csv.DictWriter(fh, fieldnames=headers)
+                    writer.writeheader()
+                    for row in rows:
+                        writer.writerow(row)
+        except Exception as exc:
+            print(f"Failed to export trade history CSV: {exc}", file=sys.stderr)
+
+    def _update_trade_profit_cache(
+        self,
+        trade_id: str,
+        profit1: float,
+        commission1: float,
+        swap1: float,
+        profit2: float,
+        commission2: float,
+        swap2: float,
+    ) -> None:
         with self._trade_lock:
             info = self.paired_trades.get(trade_id)
             if not info:
                 return
             if isinstance(info.get('account1'), dict):
-                info['account1']['last_profit'] = float(profit1)
+                account1 = info['account1']
+                account1['last_profit'] = float(profit1)
+                account1['last_commission'] = float(commission1)
+                account1['last_swap'] = float(swap1)
+                account1['commission'] = float(commission1)
+                account1['swap'] = float(swap1)
             if isinstance(info.get('account2'), dict):
-                info['account2']['last_profit'] = float(profit2)
+                account2 = info['account2']
+                account2['last_profit'] = float(profit2)
+                account2['last_commission'] = float(commission2)
+                account2['last_swap'] = float(swap2)
+                account2['commission'] = float(commission2)
+                account2['swap'] = float(swap2)
 
     @staticmethod
     def _direction_key_to_display(key: str) -> str:
@@ -916,6 +1065,10 @@ class App:
         eprice2 = r2.get("entry_price")
         etime1 = r1.get("entry_time") or 0
         etime2 = r2.get("entry_time") or 0
+        commission1 = float(r1.get("commission", 0.0) or 0.0)
+        commission2 = float(r2.get("commission", 0.0) or 0.0)
+        swap1 = float(r1.get("swap", 0.0) or 0.0)
+        swap2 = float(r2.get("swap", 0.0) or 0.0)
 
         if isinstance(eprice1, (int, float)):
             entry["account1"]["entry_price"] = float(eprice1)
@@ -923,6 +1076,14 @@ class App:
             entry["account2"]["entry_price"] = float(eprice2)
         entry["account1"]["entry_time"] = int(etime1) if etime1 else 0
         entry["account2"]["entry_time"] = int(etime2) if etime2 else 0
+        entry["account1"]["commission"] = commission1
+        entry["account2"]["commission"] = commission2
+        entry["account1"]["swap"] = swap1
+        entry["account2"]["swap"] = swap2
+        entry["account1"]["last_commission"] = commission1
+        entry["account2"]["last_commission"] = commission2
+        entry["account1"]["last_swap"] = swap1
+        entry["account2"]["last_swap"] = swap2
 
         self.table.add_row(
             trade_id,
@@ -932,17 +1093,33 @@ class App:
                 lot1,
                 f"{eprice1:.5f}" if isinstance(eprice1, (int, float)) else "",
                 self._fmt_time(int(etime1)),
+                f"{commission1:.2f}",
+                f"{swap1:.2f}",
                 "0.00",
                 symbol2,
                 lot2,
                 f"{eprice2:.5f}" if isinstance(eprice2, (int, float)) else "",
                 self._fmt_time(int(etime2)),
+                f"{commission2:.2f}",
+                f"{swap2:.2f}",
                 "0.00",
                 side_label,
+                f"{commission1 + commission2:.2f}",
+                f"{swap1 + swap2:.2f}",
                 "0.00",
                 "Close",
             ],
-            dynamic_indices={"p1": 5, "p2": 10, "combined": 12},
+            dynamic_fields={
+                "p1_commission": 5,
+                "p1_swap": 6,
+                "p1_profit": 7,
+                "p2_commission": 12,
+                "p2_swap": 13,
+                "p2_profit": 14,
+                "combined_commission": 16,
+                "combined_swap": 17,
+                "combined_profit": 18,
+            },
             close_callback=self._on_close_pair,
         )
         return trade_id
@@ -1136,24 +1313,40 @@ class App:
 
         p1_profit = float(account1.get('last_profit', 0.0) or 0.0)
         p2_profit = float(account2.get('last_profit', 0.0) or 0.0)
+        p1_commission = float(account1.get('last_commission', account1.get('commission', 0.0)) or 0.0)
+        p2_commission = float(account2.get('last_commission', account2.get('commission', 0.0)) or 0.0)
+        p1_swap = float(account1.get('last_swap', account1.get('swap', 0.0)) or 0.0)
+        p2_swap = float(account2.get('last_swap', account2.get('swap', 0.0)) or 0.0)
         if self.worker1 and account1_src.get('position'):
             try:
                 res1 = self.worker1.get_profit(account1_src['position'])
                 p1_profit = float(res1.get('profit', p1_profit))
+                p1_commission = float(res1.get('commission', p1_commission))
+                p1_swap = float(res1.get('swap', p1_swap))
             except Exception:
                 pass
         if self.worker2 and account2_src.get('position'):
             try:
                 res2 = self.worker2.get_profit(account2_src['position'])
                 p2_profit = float(res2.get('profit', p2_profit))
+                p2_commission = float(res2.get('commission', p2_commission))
+                p2_swap = float(res2.get('swap', p2_swap))
             except Exception:
                 pass
 
         account1.pop('last_profit', None)
         account2.pop('last_profit', None)
+        account1.pop('last_commission', None)
+        account2.pop('last_commission', None)
+        account1.pop('last_swap', None)
+        account2.pop('last_swap', None)
         close_time = time.time()
         account1['profit'] = p1_profit
         account2['profit'] = p2_profit
+        account1['commission'] = p1_commission
+        account2['commission'] = p2_commission
+        account1['swap'] = p1_swap
+        account2['swap'] = p2_swap
 
         history_entry = {
             'trade_id': trade_id,
@@ -1164,6 +1357,8 @@ class App:
             'account1': account1,
             'account2': account2,
             'combined_profit': p1_profit + p2_profit,
+            'combined_commission': p1_commission + p2_commission,
+            'combined_swap': p1_swap + p2_swap,
         }
 
         try:
@@ -1218,9 +1413,42 @@ class App:
 
                 p1_profit = float(p1.get("profit", 0.0) or 0.0)
                 p2_profit = float(p2.get("profit", 0.0) or 0.0)
+                p1_commission = float(
+                    p1.get("commission", a1.get("last_commission", a1.get("commission", 0.0))) or 0.0
+                )
+                p1_swap = float(p1.get("swap", a1.get("last_swap", a1.get("swap", 0.0))) or 0.0)
+                p2_commission = float(
+                    p2.get("commission", a2.get("last_commission", a2.get("commission", 0.0))) or 0.0
+                )
+                p2_swap = float(p2.get("swap", a2.get("last_swap", a2.get("swap", 0.0))) or 0.0)
+
                 total = p1_profit + p2_profit
-                self._update_trade_profit_cache(trade_id, p1_profit, p2_profit)
-                self.table.set_profits(trade_id, p1_profit, p2_profit, total)
+                combined_commission = p1_commission + p2_commission
+                combined_swap = p1_swap + p2_swap
+
+                self._update_trade_profit_cache(
+                    trade_id,
+                    p1_profit,
+                    p1_commission,
+                    p1_swap,
+                    p2_profit,
+                    p2_commission,
+                    p2_swap,
+                )
+                self.table.set_metrics(
+                    trade_id,
+                    {
+                        "p1_profit": p1_profit,
+                        "p1_commission": p1_commission,
+                        "p1_swap": p1_swap,
+                        "p2_profit": p2_profit,
+                        "p2_commission": p2_commission,
+                        "p2_swap": p2_swap,
+                        "combined_profit": total,
+                        "combined_commission": combined_commission,
+                        "combined_swap": combined_swap,
+                    },
+                )
 
                 if not p1.get("open") and not p2.get("open"):
                     with self._trade_lock:
@@ -1231,10 +1459,22 @@ class App:
                         account2_entry = dict(original.get("account2", {}) or {})
                         profit1 = float(account1_entry.get("last_profit", p1_profit) or 0.0)
                         profit2 = float(account2_entry.get("last_profit", p2_profit) or 0.0)
+                        commission1 = float(account1_entry.get("last_commission", p1_commission) or 0.0)
+                        commission2 = float(account2_entry.get("last_commission", p2_commission) or 0.0)
+                        swap1 = float(account1_entry.get("last_swap", p1_swap) or 0.0)
+                        swap2 = float(account2_entry.get("last_swap", p2_swap) or 0.0)
                         account1_entry.pop("last_profit", None)
                         account2_entry.pop("last_profit", None)
+                        account1_entry.pop("last_commission", None)
+                        account2_entry.pop("last_commission", None)
+                        account1_entry.pop("last_swap", None)
+                        account2_entry.pop("last_swap", None)
                         account1_entry["profit"] = profit1
                         account2_entry["profit"] = profit2
+                        account1_entry["commission"] = commission1
+                        account2_entry["commission"] = commission2
+                        account1_entry["swap"] = swap1
+                        account2_entry["swap"] = swap2
                         history_entry = {
                             "trade_id": trade_id,
                             "schedule": original.get("schedule"),
@@ -1244,6 +1484,8 @@ class App:
                             "account1": account1_entry,
                             "account2": account2_entry,
                             "combined_profit": account1_entry["profit"] + account2_entry["profit"],
+                            "combined_commission": commission1 + commission2,
+                            "combined_swap": swap1 + swap2,
                         }
                         self._record_trade_history(history_entry)
         finally:

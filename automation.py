@@ -174,6 +174,20 @@ class AppConfig:
                     )
             if not threads:
                 threads = [thread for thread in defaults]
+
+            # Ensure thread IDs are unique to avoid automation collisions when
+            # users duplicate configuration blocks without changing the ID.
+            used_ids: dict[str, int] = {}
+            for idx, thread in enumerate(threads, start=1):
+                base_id = (thread.thread_id or f"{prefix}-{idx}").strip() or f"{prefix}-{idx}"
+                candidate = base_id
+                suffix = 1
+                while candidate in used_ids:
+                    suffix += 1
+                    candidate = f"{base_id}-{suffix}"
+                used_ids[candidate] = 1
+                if candidate != thread.thread_id:
+                    thread.thread_id = candidate
             return threads
 
         if "primary_threads" in data or "wednesday_threads" in data:
