@@ -66,6 +66,16 @@ class AutomationLogicTests(unittest.TestCase):
         spreads = {"EURUSD": 0.4, "USDJPY": 0.3}
         self.assertEqual(trades_due_for_close([trade], self.now, spreads), ["T2"])
 
+    def test_trade_waits_for_hold_time_before_spread_exit(self) -> None:
+        opened = self.now - timedelta(minutes=10)
+        trade = TrackedTrade("T3", opened, ("EURUSD", "USDJPY"), 60, 0.5)
+        spreads = {"EURUSD": 0.4, "USDJPY": 0.3}
+        # Still within hold period, should not close
+        self.assertEqual(trades_due_for_close([trade], self.now, spreads), [])
+
+        later = self.now + timedelta(minutes=60)
+        self.assertEqual(trades_due_for_close([trade], later, spreads), ["T3"])
+
     def test_drawdown_detection(self) -> None:
         risk = RiskConfig(drawdown_enabled=True, drawdown_stop=5.0)
         accounts = [{"balance": 1000, "equity": 930}, {"balance": 2000, "equity": 1980}]
