@@ -355,15 +355,13 @@ def trades_due_for_close(
 ) -> List[str]:
     to_close: List[str] = []
     for trade in trades:
-        hold_delta = (
-            timedelta(minutes=max(trade.close_after_minutes, 0))
-            if trade.close_after_minutes > 0
-            else None
-        )
-        should_close = False
-        if hold_delta is not None and now - trade.opened_at >= hold_delta:
-            should_close = True
-        if not should_close and trade.max_exit_spread > 0:
+        min_hold_minutes = max(int(trade.close_after_minutes), 0)
+        hold_delta = timedelta(minutes=min_hold_minutes) if min_hold_minutes > 0 else None
+
+        if hold_delta is not None and now - trade.opened_at < hold_delta:
+            continue
+
+        if trade.max_exit_spread > 0:
             spreads_ok = []
             for sym in trade.symbols:
                 spread = spreads.get(sym)
@@ -371,10 +369,10 @@ def trades_due_for_close(
                     spreads_ok.append(False)
                 else:
                     spreads_ok.append(spread <= trade.max_exit_spread)
-            if spreads_ok and all(spreads_ok):
-                should_close = True
-        if should_close:
-            to_close.append(trade.trade_id)
+            if not spreads_ok or not all(spreads_ok):
+                continue
+
+        to_close.append(trade.trade_id)
     return to_close
 
 
