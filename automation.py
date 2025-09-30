@@ -49,6 +49,28 @@ class ThreadSchedule:
             "weekdays": list(self.weekdays),
         }
 
+    @staticmethod
+    def _parse_weekdays(value: Optional[object]) -> Optional[List[int]]:
+        """Normalise a user supplied weekday collection.
+
+        Returns ``None`` when *value* is ``None`` or cannot be interpreted as a
+        collection of weekday numbers. An empty list is returned when the user
+        explicitly provided an empty collection so that "no restriction" is
+        preserved.
+        """
+
+        if value is None:
+            return None
+        if isinstance(value, (list, tuple, set)):
+            result: List[int] = []
+            for item in value:
+                try:
+                    result.append(int(item) % 7)
+                except Exception:
+                    continue
+            return result
+        return None
+
     @classmethod
     def from_dict(
         cls,
@@ -59,7 +81,12 @@ class ThreadSchedule:
         weekdays: Optional[Sequence[int]] = None,
     ) -> "ThreadSchedule":
         data = data or {}
-        wd = list(weekdays) if weekdays is not None else list(data.get("weekdays", [])) or _default_primary_weekdays()
+
+        supplied_weekdays = cls._parse_weekdays(data.get("weekdays"))
+        if supplied_weekdays is None:
+            wd = list(weekdays) if weekdays is not None else _default_primary_weekdays()
+        else:
+            wd = supplied_weekdays
         return cls(
             thread_id=str(data.get("thread_id") or default_id),
             name=str(data.get("name") or default_name),

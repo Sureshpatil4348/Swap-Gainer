@@ -102,6 +102,33 @@ class AutomationLogicTests(unittest.TestCase):
         self.assertTrue(all(thread.thread_id for thread in config.primary_threads))
         self.assertTrue(all(thread.thread_id for thread in config.wednesday_threads))
 
+    def test_config_respects_custom_weekdays(self) -> None:
+        data = {
+            "timezone": "UTC",
+            "primary_threads": [
+                {
+                    "thread_id": "primary-1",
+                    "name": "Primary One",
+                    "enabled": True,
+                    "symbol1": "EURUSD",
+                    "weekdays": [1],
+                }
+            ],
+            "wednesday_threads": [
+                {
+                    "thread_id": "wednesday-1",
+                    "name": "Wed One",
+                    "enabled": True,
+                    "symbol1": "GBPUSD",
+                    "weekdays": [2],
+                }
+            ],
+        }
+
+        config = AppConfig.from_dict(data)
+        self.assertEqual(config.primary_threads[0].weekdays, [1])
+        self.assertEqual(config.wednesday_threads[0].weekdays, [2])
+
 
 if __name__ == "__main__":
     unittest.main()
