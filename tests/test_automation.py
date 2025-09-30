@@ -10,6 +10,7 @@ sys.path.append(str(Path(__file__).resolve().parents[1]))
 from automation import (
     AppConfig,
     AutomationState,
+    ExitConfig,
     RiskConfig,
     ThreadSchedule,
     TrackedTrade,
@@ -53,6 +54,28 @@ class AutomationLogicTests(unittest.TestCase):
     def test_state_active_trades_missing_defaults_to_empty(self) -> None:
         restored = AutomationState.from_dict({"last_runs": {}, "trade_history": []})
         self.assertEqual(restored.active_trades, [])
+
+    def test_exit_config_defaults(self) -> None:
+        config = AppConfig.from_dict({})
+        self.assertEqual(config.exit.close_logic_mode, "spread")
+        self.assertEqual(config.exit.net_pnl_threshold, 0.0)
+        self.assertEqual(config.exit.close_start_minutes, 60)
+        self.assertEqual(config.exit.close_stop_minutes, 90)
+
+    def test_exit_config_custom_values(self) -> None:
+        data = {
+            "exit": {
+                "close_logic_mode": "net_pnl_threshold",
+                "net_pnl_threshold": 12.5,
+                "close_start_minutes": 45,
+                "close_stop_minutes": 90,
+            }
+        }
+        config = AppConfig.from_dict(data)
+        self.assertEqual(config.exit.close_logic_mode, "net_pnl_threshold")
+        self.assertEqual(config.exit.net_pnl_threshold, 12.5)
+        self.assertEqual(config.exit.close_start_minutes, 45)
+        self.assertEqual(config.exit.close_stop_minutes, 90)
 
     def test_schedule_triggers_once_per_day(self) -> None:
         schedule = ThreadSchedule(

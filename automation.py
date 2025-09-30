@@ -125,6 +125,32 @@ class RiskConfig:
         )
 
 
+@dataclass
+class ExitConfig:
+    close_logic_mode: str = "spread"
+    net_pnl_threshold: float = 0.0
+    close_start_minutes: int = 60
+    close_stop_minutes: int = 90
+
+    def to_dict(self) -> Dict[str, object]:
+        return {
+            "close_logic_mode": self.close_logic_mode,
+            "net_pnl_threshold": self.net_pnl_threshold,
+            "close_start_minutes": self.close_start_minutes,
+            "close_stop_minutes": self.close_stop_minutes,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Optional[Dict[str, object]]) -> "ExitConfig":
+        data = data or {}
+        return cls(
+            close_logic_mode=str(data.get("close_logic_mode", "spread") or "spread"),
+            net_pnl_threshold=float(data.get("net_pnl_threshold", 0.0) or 0.0),
+            close_start_minutes=int(data.get("close_start_minutes", 60) or 0),
+            close_stop_minutes=int(data.get("close_stop_minutes", 90) or 0),
+        )
+
+
 def _default_primary_threads() -> List[ThreadSchedule]:
     return [
         ThreadSchedule(
@@ -166,6 +192,7 @@ class AppConfig:
     primary_threads: List[ThreadSchedule] = field(default_factory=_default_primary_threads)
     wednesday_threads: List[ThreadSchedule] = field(default_factory=_default_wednesday_threads)
     risk: RiskConfig = field(default_factory=RiskConfig)
+    exit: ExitConfig = field(default_factory=ExitConfig)
 
     def to_dict(self) -> Dict[str, object]:
         return {
@@ -173,6 +200,7 @@ class AppConfig:
             "primary_threads": [thread.to_dict() for thread in self.primary_threads],
             "wednesday_threads": [thread.to_dict() for thread in self.wednesday_threads],
             "risk": self.risk.to_dict(),
+            "exit": self.exit.to_dict(),
         }
 
     @classmethod
@@ -254,11 +282,13 @@ class AppConfig:
         wednesday_threads = (wednesday_threads + _default_wednesday_threads())[:3]
 
         risk = RiskConfig.from_dict(data.get("risk"))
+        exit_cfg = ExitConfig.from_dict(data.get("exit"))
         return cls(
             timezone=timezone,
             primary_threads=primary_threads,
             wednesday_threads=wednesday_threads,
             risk=risk,
+            exit=exit_cfg,
         )
 
 
@@ -305,6 +335,14 @@ class TrackedTrade:
     symbols: Sequence[str]
     close_after_minutes: int
     max_exit_spread: float
+    close_logic_mode: str = "spread"
+    net_pnl_threshold: float = 0.0
+    close_start_minutes: int = 0
+    close_stop_minutes: int = 0
+    combined_profit: float = 0.0
+    exit_checking_active: bool = False
+    exit_condition_met_time: Optional[datetime] = None
+    force_closed_at_stop: bool = False
 
 
 def parse_time_string(value: str) -> Optional[time]:
