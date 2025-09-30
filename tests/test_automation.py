@@ -32,6 +32,28 @@ class AutomationLogicTests(unittest.TestCase):
         self.assertIsNone(parse_time_string("bad"))
         self.assertIsNone(parse_time_string(""))
 
+    def test_state_active_trades_round_trip(self) -> None:
+        state = AutomationState(
+            last_runs={"primary-1": "2024-05-06"},
+            trade_history=[{"trade_id": "T00001"}],
+            active_trades=[
+                {
+                    "trade_id": "T00002",
+                    "account1": {"symbol": "EURUSD", "lot": 0.01},
+                    "account2": {"symbol": "USDJPY", "lot": 0.02},
+                }
+            ],
+        )
+
+        data = state.to_dict()
+        restored = AutomationState.from_dict(data)
+
+        self.assertEqual(restored.active_trades, state.active_trades)
+
+    def test_state_active_trades_missing_defaults_to_empty(self) -> None:
+        restored = AutomationState.from_dict({"last_runs": {}, "trade_history": []})
+        self.assertEqual(restored.active_trades, [])
+
     def test_schedule_triggers_once_per_day(self) -> None:
         schedule = ThreadSchedule(
             thread_id="primary-1",

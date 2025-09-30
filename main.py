@@ -1,5 +1,7 @@
 import csv
 import os
+import copy
+import re
 import sys
 import uuid
 import time
@@ -248,6 +250,7 @@ class AutomationRunner:
                     now = datetime.utcnow()
                 changed = self.app.evaluate_automation(now, config, state)
                 if changed:
+                    state = self.app.update_state_snapshot(state)
                     self.persistence.save_state(state)
                     self.app.on_state_updated(state)
             except Exception as exc:
@@ -309,6 +312,8 @@ class App:
         self._scrollable_body = None
 
         self._build_ui()
+        self._restore_active_trades()
+        self._restore_trade_counter()
         self._refresh_schedule_overview(self.state)
         self._populate_trade_history_tree()
         self._schedule_profit_updates()
@@ -704,16 +709,235 @@ class App:
 
         self._invoke_on_ui(_update)
 
+    def _add_trade_to_table(self, trade_id: str, entry: Dict[str, Any]) -> None:
+        if not getattr(self, "table", None):
+            return
+
+        account1 = dict(entry.get("account1", {}) or {})
+        account2 = dict(entry.get("account2", {}) or {})
+
+        symbol1 = str(account1.get("symbol", ""))
+        symbol2 = str(account2.get("symbol", ""))
+
+        try:
+            lot1 = float(account1.get("lot", 0.0) or 0.0)
+        except Exception:
+            lot1 = 0.0
+        try:
+            lot2 = float(account2.get("lot", 0.0) or 0.0)
+        except Exception:
+            lot2 = 0.0
+        account1["lot"] = lot1
+        account2["lot"] = lot2
+
+        def _parse_price(value: Any) -> Optional[float]:
+            if isinstance(value, (int, float)):
+                return float(value)
+            if isinstance(value, str):
+                try:
+                    return float(value)
+                except Exception:
+                    return None
+            return None
+
+        price1 = _parse_price(account1.get("entry_price"))
+        price2 = _parse_price(account2.get("entry_price"))
+        if price1 is not None:
+            account1["entry_price"] = price1
+        if price2 is not None:
+            account2["entry_price"] = price2
+
+        def _parse_time_value(value: Any) -> int:
+            try:
+                return int(float(value or 0))
+            except Exception:
+                return 0
+
+        entry_time1 = _parse_time_value(account1.get("entry_time"))
+        entry_time2 = _parse_time_value(account2.get("entry_time"))
+        account1["entry_time"] = entry_time1
+        account2["entry_time"] = entry_time2
+
+        def _parse_float(value: Any) -> float:
+            try:
+                return float(value or 0.0)
+            except Exception:
+                return 0.0
+
+        commission1 = _parse_float(account1.get("commission", account1.get("last_commission", 0.0)))
+        commission2 = _parse_float(account2.get("commission", account2.get("last_commission", 0.0)))
+        swap1 = _parse_float(account1.get("swap", account1.get("last_swap", 0.0)))
+        swap2 = _parse_float(account2.get("swap", account2.get("last_swap", 0.0)))
+        profit1 = _parse_float(account1.get("last_profit", account1.get("profit", 0.0)))
+        profit2 = _parse_float(account2.get("last_profit", account2.get("profit", 0.0)))
+
+        account1["commission"] = commission1
+        account2["commission"] = commission2
+        account1["last_commission"] = commission1
+        account2["last_commission"] = commission2
+        account1["swap"] = swap1
+        account2["swap"] = swap2
+        account1["last_swap"] = swap1
+        account2["last_swap"] = swap2
+        account1["last_profit"] = profit1
+        account2["last_profit"] = profit2
+
+        side1 = str(account1.get("side", "") or "").lower()
+        side2 = str(account2.get("side", "") or "").lower()
+        if side1 and side2:
+            side_label = side1.upper() if side1 == side2 else f"{side1.upper()}/{side2.upper()}"
+        else:
+            side_label = (side1 or side2).upper()
+
+        combined_commission = commission1 + commission2
+        combined_swap = swap1 + swap2
+        combined_profit = profit1 + profit2
+
+        entry["account1"] = account1
+        entry["account2"] = account2
+
+        self.table.add_row(
+            trade_id,
+            [
+                trade_id,
+                symbol1,
+                lot1,
+                f"{price1:.5f}" if isinstance(price1, float) else "",
+                self._fmt_time(entry_time1),
+                f"{commission1:.2f}",
+                f"{swap1:.2f}",
+                f"{profit1:.2f}",
+                symbol2,
+                lot2,
+                f"{price2:.5f}" if isinstance(price2, float) else "",
+                self._fmt_time(entry_time2),
+                f"{commission2:.2f}",
+                f"{swap2:.2f}",
+                f"{profit2:.2f}",
+                side_label,
+                f"{combined_commission:.2f}",
+                f"{combined_swap:.2f}",
+                f"{combined_profit:.2f}",
+                "Close",
+            ],
+            dynamic_fields={
+                "p1_commission": 5,
+                "p1_swap": 6,
+                "p1_profit": 7,
+                "p2_commission": 12,
+                "p2_swap": 13,
+                "p2_profit": 14,
+                "combined_commission": 16,
+                "combined_swap": 17,
+                "combined_profit": 18,
+            },
+            close_callback=self._on_close_pair,
+        )
+
+        self.table.set_metrics(
+            trade_id,
+            {
+                "p1_commission": commission1,
+                "p1_swap": swap1,
+                "p1_profit": profit1,
+                "p2_commission": commission2,
+                "p2_swap": swap2,
+                "p2_profit": profit2,
+                "combined_commission": combined_commission,
+                "combined_swap": combined_swap,
+                "combined_profit": combined_profit,
+            },
+        )
+
+    def _snapshot_active_trades(self) -> list[Dict[str, Any]]:
+        snapshot: list[Dict[str, Any]] = []
+        with self._trade_lock:
+            for trade_id, info in self.paired_trades.items():
+                entry = {"trade_id": str(trade_id)}
+                entry.update(copy.deepcopy(info))
+                snapshot.append(entry)
+        return snapshot
+
+    def _update_state_snapshot(self, state: Optional[AutomationState] = None) -> AutomationState:
+        target = state or getattr(self, "state", None)
+        if target is None:
+            target = self.persistence.get_state()
+
+        history_copy: list[Dict[str, Any]] = []
+        for item in self.trade_history:
+            if isinstance(item, dict):
+                history_copy.append(dict(item))
+        target.trade_history = history_copy
+        target.active_trades = self._snapshot_active_trades()
+        self.state = target
+        return target
+
+    def update_state_snapshot(self, state: Optional[AutomationState] = None) -> AutomationState:
+        return self._update_state_snapshot(state)
+
+    def _save_state(self) -> None:
+        state = self._update_state_snapshot()
+        self.persistence.save_state(state)
+
+    def _restore_active_trades(self) -> None:
+        active = getattr(self.state, "active_trades", [])
+        if not isinstance(active, list):
+            return
+
+        restored = 0
+        for raw in active:
+            if not isinstance(raw, dict):
+                continue
+            trade_id = str(raw.get("trade_id") or "").strip()
+            if not trade_id:
+                continue
+            info = {k: copy.deepcopy(v) for k, v in raw.items() if k != "trade_id"}
+            with self._trade_lock:
+                self.paired_trades[trade_id] = info
+            self._add_trade_to_table(trade_id, info)
+            restored += 1
+
+        if restored:
+            self._set_automation_status(f"Restored {restored} active trade(s) from previous session.", ok=True)
+
+        self._update_state_snapshot(self.state)
+
+    def _restore_trade_counter(self) -> None:
+        highest = 0
+
+        for trade_id in list(self.paired_trades.keys()):
+            seq = self._extract_trade_sequence(trade_id)
+            if seq > highest:
+                highest = seq
+
+        for entry in self.trade_history:
+            if isinstance(entry, dict):
+                seq = self._extract_trade_sequence(entry.get("trade_id"))
+                if seq > highest:
+                    highest = seq
+
+        if highest >= self.trade_counter:
+            self.trade_counter = highest + 1
+
+    @staticmethod
+    def _extract_trade_sequence(trade_id: Optional[str]) -> int:
+        if not isinstance(trade_id, str):
+            return 0
+        match = re.search(r"(\d+)$", trade_id.strip())
+        if not match:
+            return 0
+        try:
+            return int(match.group(1))
+        except Exception:
+            return 0
+
     def _record_trade_history(self, entry: Dict[str, Any]) -> None:
         cleaned = dict(entry)
         cleaned.setdefault('recorded_at', time.time())
         self.trade_history.append(cleaned)
         if len(self.trade_history) > self.trade_history_limit:
             self.trade_history = self.trade_history[-self.trade_history_limit:]
-        if getattr(self, 'state', None) is None:
-            self.state = self.persistence.get_state()
-        self.state.trade_history = [dict(item) for item in self.trade_history]
-        self.persistence.save_state(self.state)
+        self._save_state()
         self._populate_trade_history_tree()
         self._export_trade_history_csv()
 
@@ -1133,7 +1357,6 @@ class App:
         with self._trade_lock:
             self.paired_trades[trade_id] = entry
 
-        side_label = f"{side1.upper()}/{side2.upper()}" if side1.lower() != side2.lower() else side1.upper()
         eprice1 = r1.get("entry_price")
         eprice2 = r2.get("entry_price")
         etime1 = r1.get("entry_time") or 0
@@ -1158,43 +1381,8 @@ class App:
         entry["account1"]["last_swap"] = swap1
         entry["account2"]["last_swap"] = swap2
 
-        self.table.add_row(
-            trade_id,
-            [
-                trade_id,
-                symbol1,
-                lot1,
-                f"{eprice1:.5f}" if isinstance(eprice1, (int, float)) else "",
-                self._fmt_time(int(etime1)),
-                f"{commission1:.2f}",
-                f"{swap1:.2f}",
-                "0.00",
-                symbol2,
-                lot2,
-                f"{eprice2:.5f}" if isinstance(eprice2, (int, float)) else "",
-                self._fmt_time(int(etime2)),
-                f"{commission2:.2f}",
-                f"{swap2:.2f}",
-                "0.00",
-                side_label,
-                f"{commission1 + commission2:.2f}",
-                f"{swap1 + swap2:.2f}",
-                "0.00",
-                "Close",
-            ],
-            dynamic_fields={
-                "p1_commission": 5,
-                "p1_swap": 6,
-                "p1_profit": 7,
-                "p2_commission": 12,
-                "p2_swap": 13,
-                "p2_profit": 14,
-                "combined_commission": 16,
-                "combined_swap": 17,
-                "combined_profit": 18,
-            },
-            close_callback=self._on_close_pair,
-        )
+        self._add_trade_to_table(trade_id, entry)
+        self._save_state()
         return trade_id
 
     def _fetch_spreads(self, requests: Sequence[tuple[Optional[WorkerClient], str]]) -> Dict[str, float]:

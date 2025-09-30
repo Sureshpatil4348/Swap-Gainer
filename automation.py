@@ -266,23 +266,35 @@ class AppConfig:
 class AutomationState:
     last_runs: Dict[str, str] = field(default_factory=dict)
     trade_history: List[Dict[str, Any]] = field(default_factory=list)
+    active_trades: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, object]:
-        return {"last_runs": dict(self.last_runs), "trade_history": [dict(entry) for entry in self.trade_history]}
+        return {
+            "last_runs": dict(self.last_runs),
+            "trade_history": [dict(entry) for entry in self.trade_history],
+            "active_trades": [dict(entry) for entry in self.active_trades],
+        }
 
     @classmethod
     def from_dict(cls, data: Optional[Dict[str, object]]) -> "AutomationState":
         data = data or {}
         lr = data.get("last_runs") or {}
         raw_history = data.get("trade_history") or []
+        raw_active = data.get("active_trades") or []
         history: List[Dict[str, Any]] = []
         if isinstance(raw_history, list):
             for item in raw_history:
                 if isinstance(item, dict):
                     history.append({str(k): item[k] for k in item.keys()})
+        active_trades: List[Dict[str, Any]] = []
+        if isinstance(raw_active, list):
+            for item in raw_active:
+                if isinstance(item, dict):
+                    active_trades.append({str(k): item[k] for k in item.keys()})
         return cls(
             last_runs={str(k): str(v) for k, v in lr.items()},
             trade_history=history,
+            active_trades=active_trades,
         )
 
 
