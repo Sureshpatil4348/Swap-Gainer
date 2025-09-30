@@ -1664,25 +1664,32 @@ class App:
             for trade_id, info in snapshot.items():
                 a1 = info.get("account1", {}) or {}
                 a2 = info.get("account2", {}) or {}
-                try:
-                    p1 = self.worker1.get_profit(a1.get("position")) if self.worker1 and a1.get("position") else {"open": False, "profit": a1.get("last_profit", 0.0)}
-                except Exception:
-                    p1 = {"open": False, "profit": a1.get("last_profit", 0.0)}
-                try:
-                    p2 = self.worker2.get_profit(a2.get("position")) if self.worker2 and a2.get("position") else {"open": False, "profit": a2.get("last_profit", 0.0)}
-                except Exception:
-                    p2 = {"open": False, "profit": a2.get("last_profit", 0.0)}
+                p1: Optional[Dict[str, Any]] = None
+                if self.worker1 and self.connected1 and a1.get("position"):
+                    try:
+                        p1 = self.worker1.get_profit(a1.get("position"))
+                    except Exception:
+                        p1 = None
+                p2: Optional[Dict[str, Any]] = None
+                if self.worker2 and self.connected2 and a2.get("position"):
+                    try:
+                        p2 = self.worker2.get_profit(a2.get("position"))
+                    except Exception:
+                        p2 = None
 
-                p1_profit = float(p1.get("profit", 0.0) or 0.0)
-                p2_profit = float(p2.get("profit", 0.0) or 0.0)
+                p1_profit = float((p1 or {}).get("profit", a1.get("last_profit", a1.get("profit", 0.0))) or 0.0)
+                p2_profit = float((p2 or {}).get("profit", a2.get("last_profit", a2.get("profit", 0.0))) or 0.0)
                 p1_commission = float(
-                    p1.get("commission", a1.get("last_commission", a1.get("commission", 0.0))) or 0.0
+                    (p1 or {}).get("commission", a1.get("last_commission", a1.get("commission", 0.0))) or 0.0
                 )
-                p1_swap = float(p1.get("swap", a1.get("last_swap", a1.get("swap", 0.0))) or 0.0)
+                p1_swap = float((p1 or {}).get("swap", a1.get("last_swap", a1.get("swap", 0.0))) or 0.0)
                 p2_commission = float(
-                    p2.get("commission", a2.get("last_commission", a2.get("commission", 0.0))) or 0.0
+                    (p2 or {}).get("commission", a2.get("last_commission", a2.get("commission", 0.0))) or 0.0
                 )
-                p2_swap = float(p2.get("swap", a2.get("last_swap", a2.get("swap", 0.0))) or 0.0)
+                p2_swap = float((p2 or {}).get("swap", a2.get("last_swap", a2.get("swap", 0.0))) or 0.0)
+
+                p1_open = True if p1 is None else bool(p1.get("open", True))
+                p2_open = True if p2 is None else bool(p2.get("open", True))
 
                 total = p1_profit + p2_profit
                 combined_commission = p1_commission + p2_commission
@@ -1712,7 +1719,7 @@ class App:
                     },
                 )
 
-                if not p1.get("open") and not p2.get("open"):
+                if not p1_open and not p2_open:
                     with self._trade_lock:
                         original = self.paired_trades.pop(trade_id, None)
                     self.table.remove_row(trade_id)
