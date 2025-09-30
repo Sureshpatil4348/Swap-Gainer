@@ -21,6 +21,7 @@ from mt5_worker import worker_main
 from automation import (
     AppConfig,
     AutomationState,
+    ExitConfig,
     RiskConfig,
     ThreadSchedule,
     TrackedTrade,
@@ -629,7 +630,7 @@ class App:
             p2 = float(account2.get('profit', 0.0) or 0.0)
             p2_commission = float(account2.get('commission', 0.0) or 0.0)
             p2_swap = float(account2.get('swap', 0.0) or 0.0)
-            combined = float(entry.get('combined_profit', p1 + p2) or 0.0)
+            combined = float(entry.get('realized_combined_pnl', entry.get('combined_profit', p1 + p2)) or 0.0)
             combined_commission = float(entry.get('combined_commission', p1_commission + p2_commission) or 0.0)
             combined_swap = float(entry.get('combined_swap', p1_swap + p2_swap) or 0.0)
             rows.append(
@@ -700,6 +701,13 @@ class App:
             risk_node = tree.insert('', 'end', text='Risk Controls', values=(risk_status,), open=True)
             if self.config.risk.drawdown_enabled:
                 tree.insert(risk_node, 'end', text='Drawdown Stop (%)', values=(self._format_number(self.config.risk.drawdown_stop),))
+            exit_cfg = self._current_exit_config()
+            mode_label = exit_cfg.close_logic_mode.replace('_', ' ').title()
+            exit_node = tree.insert('', 'end', text='Exit Strategy', values=(mode_label,), open=True)
+            tree.insert(exit_node, 'end', text='Close Logic Mode', values=(mode_label,))
+            tree.insert(exit_node, 'end', text='Net PnL Threshold', values=(self._format_number(exit_cfg.net_pnl_threshold),))
+            tree.insert(exit_node, 'end', text='Check Start (min)', values=(str(exit_cfg.close_start_minutes),))
+            tree.insert(exit_node, 'end', text='Check Stop (min)', values=(str(exit_cfg.close_stop_minutes),))
             primary_root = tree.insert('', 'end', text='Primary Threads', values=('',), open=True)
             for thread in self.config.primary_threads:
                 _add_thread(primary_root, thread)
@@ -849,6 +857,43 @@ class App:
             },
         )
 
+    def _current_exit_config(self) -> ExitConfig:
+        exit_cfg = getattr(self.config, "exit", None)
+        if isinstance(exit_cfg, ExitConfig):
+            return exit_cfg
+        if isinstance(exit_cfg, dict):
+            try:
+                return ExitConfig.from_dict(exit_cfg)
+            except Exception:
+                pass
+        return ExitConfig()
+
+    def _ensure_trade_exit_defaults(self, info: Dict[str, Any]) -> None:
+        exit_cfg = self._current_exit_config()
+        info.setdefault("close_logic_mode", exit_cfg.close_logic_mode)
+        info.setdefault("net_pnl_threshold", float(exit_cfg.net_pnl_threshold))
+        info.setdefault("close_start_minutes", int(exit_cfg.close_start_minutes))
+        info.setdefault("close_stop_minutes", int(exit_cfg.close_stop_minutes))
+        info.setdefault("exit_checking_active", False)
+        info.setdefault("exit_condition_met_time", 0.0)
+        info.setdefault("last_close_attempt_ts", 0.0)
+        info.setdefault("force_closed_at_stop", False)
+        info.setdefault("exit_mode_used", None)
+        info.setdefault("exit_condition_value", None)
+        info.setdefault("exit_trigger_time", None)
+
+    def _update_trade_exit_info(self, trade_id: str, **updates: Any) -> bool:
+        changed = False
+        with self._trade_lock:
+            info = self.paired_trades.get(trade_id)
+            if not info:
+                return False
+            for key, value in updates.items():
+                if info.get(key) != value:
+                    info[key] = value
+                    changed = True
+        return changed
+
     def _snapshot_active_trades(self) -> list[Dict[str, Any]]:
         snapshot: list[Dict[str, Any]] = []
         with self._trade_lock:
@@ -892,6 +937,7 @@ class App:
             if not trade_id:
                 continue
             info = {k: copy.deepcopy(v) for k, v in raw.items() if k != "trade_id"}
+            self._ensure_trade_exit_defaults(info)
             with self._trade_lock:
                 self.paired_trades[trade_id] = info
             self._add_trade_to_table(trade_id, info)
@@ -948,6 +994,15 @@ class App:
             "thread_id",
             "opened_at",
             "closed_at",
+            "close_logic_mode",
+            "net_pnl_threshold",
+            "close_start_minutes",
+            "close_stop_minutes",
+            "exit_trigger_time",
+            "exit_mode_used",
+            "exit_condition_value",
+            "realized_combined_pnl",
+            "force_closed_at_stop",
             "account1_symbol",
             "account1_lot",
             "account1_side",
@@ -994,6 +1049,15 @@ class App:
                 "thread_id": entry.get('thread_id', ''),
                 "opened_at": _fmt_ts(entry.get('opened_at', 0.0)),
                 "closed_at": _fmt_ts(entry.get('closed_at', 0.0)),
+                "close_logic_mode": entry.get('close_logic_mode', ''),
+                "net_pnl_threshold": entry.get('net_pnl_threshold', 0.0),
+                "close_start_minutes": entry.get('close_start_minutes', 0),
+                "close_stop_minutes": entry.get('close_stop_minutes', 0),
+                "exit_trigger_time": _fmt_ts(entry.get('exit_trigger_time', 0.0)),
+                "exit_mode_used": entry.get('exit_mode_used', ''),
+                "exit_condition_value": entry.get('exit_condition_value', ''),
+                "realized_combined_pnl": entry.get('realized_combined_pnl', entry.get('combined_profit', 0.0)),
+                "force_closed_at_stop": entry.get('force_closed_at_stop', False),
                 "account1_symbol": account1.get('symbol', ''),
                 "account1_lot": account1.get('lot', ''),
                 "account1_side": account1.get('side', ''),
@@ -1056,6 +1120,7 @@ class App:
                 account2['last_swap'] = float(swap2)
                 account2['commission'] = float(commission2)
                 account2['swap'] = float(swap2)
+            info['last_combined_profit'] = float(profit1 + profit2)
 
     @staticmethod
     def _direction_key_to_display(key: str) -> str:
@@ -1354,6 +1419,7 @@ class App:
             "thread_id": schedule_thread_id,
             "opened_at": time.time(),
         }
+        self._ensure_trade_exit_defaults(entry)
         with self._trade_lock:
             self.paired_trades[trade_id] = entry
 
@@ -1413,6 +1479,7 @@ class App:
         }
         with self._trade_lock:
             for trade_id, info in self.paired_trades.items():
+                self._ensure_trade_exit_defaults(info)
                 opened_ts = float(info.get("opened_at", time.time()))
                 try:
                     opened_dt = datetime.fromtimestamp(opened_ts, tz=now.tzinfo)
@@ -1433,6 +1500,35 @@ class App:
                 schedule = thread_map.get(thread_id)
                 close_after = schedule.close_after_minutes if schedule else 0
                 max_exit = schedule.max_exit_spread if schedule else 0.0
+                try:
+                    profit1 = float(account1.get("last_profit", account1.get("profit", 0.0)) or 0.0)
+                except Exception:
+                    profit1 = 0.0
+                try:
+                    profit2 = float(account2.get("last_profit", account2.get("profit", 0.0)) or 0.0)
+                except Exception:
+                    profit2 = 0.0
+                combined_profit = profit1 + profit2
+                info["last_combined_profit"] = combined_profit
+                mode_raw = str(info.get("close_logic_mode", "spread") or "spread").strip().lower()
+                info["close_logic_mode"] = mode_raw
+                net_threshold = float(info.get("net_pnl_threshold", 0.0) or 0.0)
+                start_minutes = int(info.get("close_start_minutes", 0) or 0)
+                stop_minutes = int(info.get("close_stop_minutes", 0) or 0)
+                info["net_pnl_threshold"] = net_threshold
+                info["close_start_minutes"] = start_minutes
+                info["close_stop_minutes"] = stop_minutes
+                exit_checking_active = bool(info.get("exit_checking_active", False))
+                exit_condition_ts = float(info.get("exit_condition_met_time", 0.0) or 0.0)
+                exit_condition_dt: Optional[datetime]
+                if exit_condition_ts > 0:
+                    try:
+                        exit_condition_dt = datetime.fromtimestamp(exit_condition_ts, tz=now.tzinfo)
+                    except Exception:
+                        exit_condition_dt = datetime.utcfromtimestamp(exit_condition_ts).replace(tzinfo=now.tzinfo)
+                else:
+                    exit_condition_dt = None
+                force_closed = bool(info.get("force_closed_at_stop", False))
                 trades.append(
                     TrackedTrade(
                         trade_id,
@@ -1440,6 +1536,14 @@ class App:
                         tuple(symbols),
                         close_after,
                         max_exit,
+                        close_logic_mode=mode_raw,
+                        net_pnl_threshold=net_threshold,
+                        close_start_minutes=start_minutes,
+                        close_stop_minutes=stop_minutes,
+                        combined_profit=combined_profit,
+                        exit_checking_active=exit_checking_active,
+                        exit_condition_met_time=exit_condition_dt,
+                        force_closed_at_stop=force_closed,
                     )
                 )
         return trades, requests
@@ -1494,21 +1598,106 @@ class App:
                 changed = True
 
         trades, requests = self._gather_active_trades(now, config)
+        trade_map = {trade.trade_id: trade for trade in trades}
         if trades and connected:
-            spreads = self._fetch_spreads(requests)
-            due_close = trades_due_for_close(trades, now, spreads)
-            if due_close:
-                self._set_automation_status(
-                    f"Auto-close triggered for {len(due_close)} trade(s).", ok=False
-                )
-            for trade_id in due_close:
-                self._close_pair_threadsafe(trade_id)
+            spread_trades = [trade for trade in trades if trade.close_logic_mode != "net_pnl_threshold"]
+            net_trades = [trade for trade in trades if trade.close_logic_mode == "net_pnl_threshold"]
+            spreads: Dict[str, float] = {}
+            if spread_trades and requests:
+                spreads = self._fetch_spreads(requests)
+                due_close = trades_due_for_close(spread_trades, now, spreads)
+                if due_close:
+                    self._set_automation_status(
+                        f"Auto-close triggered for {len(due_close)} trade(s).", ok=False
+                    )
+                for trade_id in due_close:
+                    trade = trade_map.get(trade_id)
+                    now_ts = time.time()
+                    updates = {
+                        "exit_mode_used": "spread",
+                        "exit_condition_value": trade.max_exit_spread if trade else None,
+                        "exit_trigger_time": now_ts,
+                        "last_close_attempt_ts": now_ts,
+                        "force_closed_at_stop": False,
+                    }
+                    if self._update_trade_exit_info(trade_id, **updates):
+                        changed = True
+                    self._close_pair_threadsafe(trade_id)
+
+            if net_trades:
+                for trade in net_trades:
+                    minutes_open = max(0.0, (now - trade.opened_at).total_seconds() / 60.0)
+                    start_minutes = max(0, trade.close_start_minutes)
+                    stop_minutes = max(0, trade.close_stop_minutes)
+                    threshold = trade.net_pnl_threshold
+                    if minutes_open >= start_minutes:
+                        if self._update_trade_exit_info(trade.trade_id, exit_checking_active=True):
+                            changed = True
+                        checking_active = True
+                    else:
+                        checking_active = False
+                    condition_met = checking_active and trade.combined_profit >= threshold
+                    if condition_met:
+                        event_ts = time.time()
+                        trigger_ts = (
+                            trade.exit_condition_met_time.timestamp()
+                            if trade.exit_condition_met_time
+                            else event_ts
+                        )
+                        updates = {
+                            "exit_mode_used": "net_pnl_threshold",
+                            "exit_condition_value": threshold,
+                            "exit_trigger_time": trigger_ts,
+                            "last_close_attempt_ts": event_ts,
+                            "force_closed_at_stop": False,
+                        }
+                        if not trade.exit_condition_met_time:
+                            updates["exit_condition_met_time"] = event_ts
+                            self._set_automation_status(
+                                f"Net PnL target met for {trade.trade_id}. Closing trade.",
+                                ok=True,
+                            )
+                        if self._update_trade_exit_info(trade.trade_id, **updates):
+                            changed = True
+                        self._close_pair_threadsafe(trade.trade_id)
+                        continue
+
+                    stop_due = stop_minutes > 0 and minutes_open >= stop_minutes
+                    if stop_due:
+                        event_ts = time.time()
+                        show_message = not trade.force_closed_at_stop
+                        updates = {
+                            "exit_mode_used": "net_pnl_threshold_stop",
+                            "exit_condition_value": threshold,
+                            "exit_trigger_time": event_ts,
+                            "force_closed_at_stop": True,
+                            "last_close_attempt_ts": event_ts,
+                            "exit_checking_active": True,
+                        }
+                        if self._update_trade_exit_info(trade.trade_id, **updates):
+                            changed = True
+                        if show_message:
+                            self._set_automation_status(
+                                f"Net PnL window expired for {trade.trade_id}. Forcing close.",
+                                ok=False,
+                            )
+                        self._close_pair_threadsafe(trade.trade_id)
 
         if connected:
             accounts = self._fetch_accounts()
             if accounts and drawdown_breached(config.risk, accounts):
                 if trades:
                     self._set_automation_status("Drawdown stop triggered. Closing all trades.", ok=False)
+                    now_ts = time.time()
+                    for trade in trades:
+                        if self._update_trade_exit_info(
+                            trade.trade_id,
+                            exit_mode_used="drawdown_stop",
+                            exit_condition_value=config.risk.drawdown_stop,
+                            exit_trigger_time=now_ts,
+                            last_close_attempt_ts=now_ts,
+                        ):
+                            changed = True
                 self._close_all_pairs_threadsafe()
 
         return changed
@@ -1610,6 +1799,18 @@ class App:
         account1['swap'] = p1_swap
         account2['swap'] = p2_swap
 
+        opened_at_ts = float(info.get('opened_at', 0.0) or 0.0)
+        total_minutes_open = max(0.0, (close_time - opened_at_ts) / 60.0) if opened_at_ts else 0.0
+        exit_mode = info.get('exit_mode_used') or 'manual'
+        exit_condition_value = info.get('exit_condition_value')
+        exit_trigger_time = float(info.get('exit_trigger_time') or info.get('exit_condition_met_time') or 0.0)
+        close_logic_mode = str(info.get('close_logic_mode', self._current_exit_config().close_logic_mode) or 'spread')
+        net_threshold = float(info.get('net_pnl_threshold', 0.0) or 0.0)
+        close_start_minutes = int(info.get('close_start_minutes', 0) or 0)
+        close_stop_minutes = int(info.get('close_stop_minutes', 0) or 0)
+        force_closed_at_stop = bool(info.get('force_closed_at_stop', False))
+        realized_combined = p1_profit + p2_profit
+
         history_entry = {
             'trade_id': trade_id,
             'schedule': info.get('schedule'),
@@ -1618,9 +1819,19 @@ class App:
             'closed_at': close_time,
             'account1': account1,
             'account2': account2,
-            'combined_profit': p1_profit + p2_profit,
+            'combined_profit': realized_combined,
             'combined_commission': p1_commission + p2_commission,
             'combined_swap': p1_swap + p2_swap,
+            'close_logic_mode': close_logic_mode,
+            'net_pnl_threshold': net_threshold,
+            'close_start_minutes': close_start_minutes,
+            'close_stop_minutes': close_stop_minutes,
+            'exit_mode_used': exit_mode,
+            'exit_condition_value': exit_condition_value,
+            'exit_trigger_time': exit_trigger_time,
+            'realized_combined_pnl': realized_combined,
+            'force_closed_at_stop': force_closed_at_stop,
+            'total_minutes_open': total_minutes_open,
         }
 
         try:

@@ -4,6 +4,12 @@
     "drawdown_enabled": false,
     "drawdown_stop": 5.0
   },
+  "exit": {
+    "close_logic_mode": "spread",
+    "net_pnl_threshold": 0.0,
+    "close_start_minutes": 60,
+    "close_stop_minutes": 90
+  },
   "primary_threads": [
     {
       "thread_id": "primary-1",
