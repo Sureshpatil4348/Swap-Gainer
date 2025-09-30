@@ -118,6 +118,7 @@ class ScrollableTable(ttk.Frame):
         super().__init__(master)
         self.canvas = tk.Canvas(self, borderwidth=0, highlightthickness=0)
         self.scroll_y = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
+        self.scroll_x = ttk.Scrollbar(self, orient="horizontal", command=self.canvas.xview)
         self.inner = ttk.Frame(self.canvas)
 
         self.inner.bind(
@@ -125,10 +126,14 @@ class ScrollableTable(ttk.Frame):
             lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")),
         )
         self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
-        self.canvas.configure(yscrollcommand=self.scroll_y.set)
+        self.canvas.configure(yscrollcommand=self.scroll_y.set, xscrollcommand=self.scroll_x.set)
+        self.canvas.bind("<Shift-MouseWheel>", self._on_shift_mousewheel)
+        self.bind("<Shift-MouseWheel>", self._on_shift_mousewheel)
+        self.inner.bind("<Shift-MouseWheel>", self._on_shift_mousewheel)
 
         self.canvas.grid(row=0, column=0, sticky="nsew")
         self.scroll_y.grid(row=0, column=1, sticky="ns")
+        self.scroll_x.grid(row=1, column=0, sticky="ew")
         self.columnconfigure(0, weight=1)
         self.rowconfigure(0, weight=1)
 
@@ -140,6 +145,12 @@ class ScrollableTable(ttk.Frame):
 
         self._next_row = 1
         self._rows: Dict[str, Dict[str, Any]] = {}
+
+    def _on_shift_mousewheel(self, event: tk.Event) -> str:
+        delta = getattr(event, "delta", 0)
+        if delta:
+            self.canvas.xview_scroll(int(-1 * (delta / 120)), "units")
+        return "break"
 
     def add_row(
         self,
@@ -156,16 +167,19 @@ class ScrollableTable(ttk.Frame):
             if c in index_to_key:
                 lbl = ttk.Label(self.inner, text=str(val))
                 lbl.grid(row=self._next_row, column=c, sticky="nsew", padx=4, pady=2)
+                lbl.bind("<Shift-MouseWheel>", self._on_shift_mousewheel)
                 dynamic_labels[index_to_key[c]] = lbl
                 widgets.append(lbl)
             else:
                 w = ttk.Label(self.inner, text=str(val))
                 w.grid(row=self._next_row, column=c, sticky="nsew", padx=4, pady=2)
+                w.bind("<Shift-MouseWheel>", self._on_shift_mousewheel)
                 widgets.append(w)
 
         # Close button
         btn = ttk.Button(self.inner, text="Close", command=lambda: close_callback(row_id))
         btn.grid(row=self._next_row, column=len(values) - 1, sticky="nsew", padx=4, pady=2)
+        btn.bind("<Shift-MouseWheel>", self._on_shift_mousewheel)
 
         self._rows[row_id] = {
             "widgets": widgets,
@@ -282,6 +296,10 @@ class App:
         self.lot1_var = tk.StringVar(value=str(primary_default.lot1))
         self.pair2_var = tk.StringVar(value=primary_default.symbol2)
         self.lot2_var = tk.StringVar(value=str(primary_default.lot2))
+        self.account1_balance_var = tk.StringVar(value="Balance: --")
+        self.account1_equity_var = tk.StringVar(value="Equity: --")
+        self.account2_balance_var = tk.StringVar(value="Balance: --")
+        self.account2_equity_var = tk.StringVar(value="Equity: --")
 
         self.automation_status_label = None
         self.schedule_tree = None
@@ -323,6 +341,27 @@ class App:
         self.automation_status_label = ttk.Label(top, text="", foreground="#555")
         self.automation_status_label.grid(row=2, column=0, columnspan=4, sticky="w", padx=6, pady=(0, 4))
 
+        account_summary = ttk.Frame(top)
+        account_summary.grid(row=3, column=0, columnspan=4, sticky="ew", padx=6, pady=(0, 4))
+        account_summary.columnconfigure(1, weight=1)
+        account_summary.columnconfigure(4, weight=1)
+
+        ttk.Label(account_summary, text="Account 1").grid(row=0, column=0, sticky="w", pady=2)
+        ttk.Label(account_summary, textvariable=self.account1_balance_var).grid(
+            row=0, column=1, sticky="w", padx=(8, 0), pady=2
+        )
+        ttk.Label(account_summary, textvariable=self.account1_equity_var).grid(
+            row=0, column=2, sticky="w", padx=(8, 0), pady=2
+        )
+
+        ttk.Label(account_summary, text="Account 2").grid(row=1, column=0, sticky="w", pady=2)
+        ttk.Label(account_summary, textvariable=self.account2_balance_var).grid(
+            row=1, column=1, sticky="w", padx=(8, 0), pady=2
+        )
+        ttk.Label(account_summary, textvariable=self.account2_equity_var).grid(
+            row=1, column=2, sticky="w", padx=(8, 0), pady=2
+        )
+
         body_container = ttk.Frame(self.root)
         body_container.pack(fill="both", expand=True, padx=12, pady=(0, 12))
 
@@ -348,9 +387,23 @@ class App:
             if delta:
                 canvas.yview_scroll(int(-1 * (delta / 120)), "units")
 
+        def _on_shift_mousewheel(event):
+            delta = getattr(event, 'delta', 0)
+            if delta:
+                canvas.xview_scroll(int(-1 * (delta / 120)), "units")
+
         def _bind_to_mousewheel(widget):
-            widget.bind("<Enter>", lambda _: canvas.bind_all("<MouseWheel>", _on_mousewheel))
-            widget.bind("<Leave>", lambda _: canvas.unbind_all("<MouseWheel>"))
+            widget.bind("<Enter>", lambda _: (canvas.bind_all("<MouseWheel>", _on_mousewheel), canvas.bind_all("<Shift-MouseWheel>", _on_shift_mousewheel)))
+            widget.bind("<Leave>", lambda _: (canvas.unbind_all("<MouseWheel>"), canvas.unbind_all("<Shift-MouseWheel>")))
+
+        def _bind_horizontal_mousewheel(widget, xview_command):
+            def _on_shift(event):
+                delta = getattr(event, "delta", 0)
+                if delta:
+                    xview_command(int(-1 * (delta / 120)), "units")
+                return "break"
+
+            widget.bind("<Shift-MouseWheel>", _on_shift, add="+")
 
         _bind_to_mousewheel(scrollable_body)
 
@@ -390,11 +443,13 @@ class App:
             ],
         )
         self.table.grid(row=0, column=0, sticky="nsew")
+        _bind_horizontal_mousewheel(self.table, self.table.canvas.xview_scroll)
 
         drives_frame = ttk.LabelFrame(scrollable_body, text="Active Drives")
         drives_frame.grid(row=1, column=0, sticky="nsew", padx=(0, 6), pady=(0, 12))
         drives_frame.columnconfigure(0, weight=1)
         drives_frame.rowconfigure(0, weight=1)
+        drives_frame.rowconfigure(1, weight=0)
 
         schedule_columns = (
             "schedule",
@@ -438,14 +493,18 @@ class App:
             self.schedule_tree.column(col, width=width, stretch=col in {"schedule", "pairs", "window"})
 
         schedule_scroll = ttk.Scrollbar(drives_frame, orient="vertical", command=self.schedule_tree.yview)
-        self.schedule_tree.configure(yscrollcommand=schedule_scroll.set)
+        schedule_scroll_x = ttk.Scrollbar(drives_frame, orient="horizontal", command=self.schedule_tree.xview)
+        self.schedule_tree.configure(yscrollcommand=schedule_scroll.set, xscrollcommand=schedule_scroll_x.set)
         self.schedule_tree.grid(row=0, column=0, sticky="nsew")
         schedule_scroll.grid(row=0, column=1, sticky="ns")
+        schedule_scroll_x.grid(row=1, column=0, columnspan=2, sticky="ew")
+        _bind_horizontal_mousewheel(self.schedule_tree, self.schedule_tree.xview_scroll)
 
         config_frame = ttk.LabelFrame(scrollable_body, text="Configuration Snapshot")
         config_frame.grid(row=1, column=1, sticky="nsew", padx=(6, 0), pady=(0, 12))
         config_frame.columnconfigure(0, weight=1)
         config_frame.rowconfigure(0, weight=1)
+        config_frame.rowconfigure(1, weight=0)
 
         self.config_tree = ttk.Treeview(
             config_frame,
@@ -460,12 +519,15 @@ class App:
         self.config_tree.column("value", width=260, stretch=True)
 
         config_scroll = ttk.Scrollbar(config_frame, orient="vertical", command=self.config_tree.yview)
-        self.config_tree.configure(yscrollcommand=config_scroll.set)
+        config_scroll_x = ttk.Scrollbar(config_frame, orient="horizontal", command=self.config_tree.xview)
+        self.config_tree.configure(yscrollcommand=config_scroll.set, xscrollcommand=config_scroll_x.set)
         self.config_tree.grid(row=0, column=0, sticky="nsew")
         config_scroll.grid(row=0, column=1, sticky="ns")
+        config_scroll_x.grid(row=1, column=0, columnspan=2, sticky="ew")
+        _bind_horizontal_mousewheel(self.config_tree, self.config_tree.xview_scroll)
 
         config_actions = ttk.Frame(config_frame)
-        config_actions.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        config_actions.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(6, 0))
         config_actions.columnconfigure(0, weight=1)
         ttk.Button(
             config_actions,
@@ -477,6 +539,7 @@ class App:
         history_frame.grid(row=2, column=0, columnspan=2, sticky="nsew")
         history_frame.columnconfigure(0, weight=1)
         history_frame.rowconfigure(0, weight=1)
+        history_frame.rowconfigure(1, weight=0)
 
         history_columns = (
             "trade_id",
@@ -524,9 +587,12 @@ class App:
             self.trade_history_tree.column(col, width=width, stretch=col in {"schedule", "combined"})
 
         history_scroll = ttk.Scrollbar(history_frame, orient="vertical", command=self.trade_history_tree.yview)
-        self.trade_history_tree.configure(yscrollcommand=history_scroll.set)
+        history_scroll_x = ttk.Scrollbar(history_frame, orient="horizontal", command=self.trade_history_tree.xview)
+        self.trade_history_tree.configure(yscrollcommand=history_scroll.set, xscrollcommand=history_scroll_x.set)
         self.trade_history_tree.grid(row=0, column=0, sticky="nsew")
         history_scroll.grid(row=0, column=1, sticky="ns")
+        history_scroll_x.grid(row=1, column=0, columnspan=2, sticky="ew")
+        _bind_horizontal_mousewheel(self.trade_history_tree, self.trade_history_tree.xview_scroll)
 
         _bind_to_mousewheel(self.trade_history_tree)
         _bind_to_mousewheel(self.schedule_tree)
@@ -799,6 +865,13 @@ class App:
         text = f"{value:.4f}"
         text = text.rstrip("0").rstrip(".")
         return text or "0"
+
+    @staticmethod
+    def _format_money(value: Any) -> str:
+        try:
+            return f"{float(value):,.2f}"
+        except (TypeError, ValueError):
+            return "--"
 
     def _refresh_schedule_overview(self, state: Optional[AutomationState] = None) -> None:
         if not hasattr(self, "schedule_tree"):
@@ -1278,6 +1351,7 @@ class App:
             server2 = d2.get('server') or ''
             msg = f"Connected: {login1}{'@' + server1 if server1 else ''} | {login2}{'@' + server2 if server2 else ''}"
             self._set_automation_status(msg, ok=True)
+            self._refresh_account_summaries()
         except Exception as e:
             messagebox.showerror("Connection Failed", str(e))
             self._cleanup_workers()
@@ -1489,7 +1563,33 @@ class App:
                         }
                         self._record_trade_history(history_entry)
         finally:
+            self._refresh_account_summaries()
             self._schedule_profit_updates()
+
+    def _refresh_account_summaries(self) -> None:
+        info1: Dict[str, Any] = {}
+        info2: Dict[str, Any] = {}
+
+        if self.worker1 and self.connected1:
+            try:
+                info1 = self.worker1.get_account_info() or {}
+            except Exception:
+                info1 = {}
+        if self.worker2 and self.connected2:
+            try:
+                info2 = self.worker2.get_account_info() or {}
+            except Exception:
+                info2 = {}
+
+        balance1 = self._format_money(info1.get("balance")) if info1 else "--"
+        equity1 = self._format_money(info1.get("equity")) if info1 else "--"
+        balance2 = self._format_money(info2.get("balance")) if info2 else "--"
+        equity2 = self._format_money(info2.get("equity")) if info2 else "--"
+
+        self.account1_balance_var.set(f"Balance: {balance1}")
+        self.account1_equity_var.set(f"Equity: {equity1}")
+        self.account2_balance_var.set(f"Balance: {balance2}")
+        self.account2_equity_var.set(f"Equity: {equity2}")
 
     def _cleanup_workers(self) -> None:
         for w in (self.worker1, self.worker2):
@@ -1504,6 +1604,10 @@ class App:
         self.connected2 = False
         self.status1.configure(text="disconnected", foreground="#b00")
         self.status2.configure(text="disconnected", foreground="#b00")
+        self.account1_balance_var.set("Balance: --")
+        self.account1_equity_var.set("Equity: --")
+        self.account2_balance_var.set("Balance: --")
+        self.account2_equity_var.set("Equity: --")
         self._set_automation_status("Disconnected from terminals.", ok=False)
 
     def on_close(self) -> None:
