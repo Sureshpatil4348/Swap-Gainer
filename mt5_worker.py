@@ -219,7 +219,18 @@ def _close_position_by_ticket(
     ok_send, result = _order_send_with_filling(request_base)
     if not ok_send:
         return False, result
-    return True, {"closed": True}
+
+    # Confirm the position is no longer open; retry briefly if required
+    for _ in range(10):
+        try:
+            remaining = MT5.positions_get(ticket=int(position_ticket))
+        except Exception:
+            remaining = None
+        if not remaining:
+            return True, {"closed": True}
+        time.sleep(0.1)
+
+    return False, {"error": "Position still open after close attempt"}
 
 
 def _get_profit_by_ticket(position_ticket: int) -> Tuple[bool, Dict[str, Any]]:

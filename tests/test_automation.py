@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sys
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
@@ -79,24 +79,81 @@ class AutomationLogicTests(unittest.TestCase):
     def test_trades_due_for_close_by_duration(self) -> None:
         opened = self.now - timedelta(minutes=65)
         trade = TrackedTrade("T1", opened, ("EURUSD", "USDJPY"), 60, 0.0)
-        result = trades_due_for_close([trade], self.now, {"EURUSD": 2.0})
-        self.assertEqual(result, ["T1"])
+        result = trades_due_for_close(
+            [trade],
+            self.now,
+            {"EURUSD": 2.0},
+            {"T1": 0.0},
+        )
+        self.assertEqual(result, [("T1", "spread")])
 
     def test_trades_due_for_close_by_spread(self) -> None:
         opened = self.now - timedelta(minutes=10)
         trade = TrackedTrade("T2", opened, ("EURUSD", "USDJPY"), 0, 0.5)
         spreads = {"EURUSD": 0.4, "USDJPY": 0.3}
-        self.assertEqual(trades_due_for_close([trade], self.now, spreads), ["T2"])
+        self.assertEqual(
+            trades_due_for_close([trade], self.now, spreads, {"T2": 0.0}),
+            [("T2", "spread")],
+        )
 
     def test_trade_waits_for_hold_time_before_spread_exit(self) -> None:
         opened = self.now - timedelta(minutes=10)
         trade = TrackedTrade("T3", opened, ("EURUSD", "USDJPY"), 60, 0.5)
         spreads = {"EURUSD": 0.4, "USDJPY": 0.3}
         # Still within hold period, should not close
-        self.assertEqual(trades_due_for_close([trade], self.now, spreads), [])
+        self.assertEqual(trades_due_for_close([trade], self.now, spreads, {"T3": 0.0}), [])
 
         later = self.now + timedelta(minutes=60)
-        self.assertEqual(trades_due_for_close([trade], later, spreads), ["T3"])
+        self.assertEqual(
+            trades_due_for_close([trade], later, spreads, {"T3": 0.0}),
+            [("T3", "spread")],
+        )
+
+    def test_trades_due_for_close_profit_condition(self) -> None:
+        opened = self.now - timedelta(minutes=90)
+        trade = TrackedTrade(
+            "T4",
+            opened,
+            ("EURUSD", "USDJPY"),
+            30,
+            0.4,
+            "profit",
+            12.0,
+        )
+        spreads = {"EURUSD": 0.2, "USDJPY": 0.3}
+        self.assertEqual(
+            trades_due_for_close([trade], self.now, spreads, {"T4": 11.0}),
+            [],
+        )
+        self.assertEqual(
+            trades_due_for_close([trade], self.now, spreads, {"T4": 12.5}),
+            [("T4", "profit")],
+        )
+
+    def test_trades_due_for_close_respects_close_window(self) -> None:
+        opened = self.now - timedelta(minutes=180)
+        trade = TrackedTrade(
+            "T5",
+            opened,
+            ("EURUSD", "USDJPY"),
+            60,
+            0.2,
+            "spread",
+            0.0,
+            time(10, 0),
+            time(12, 0),
+        )
+        spreads = {"EURUSD": 0.1, "USDJPY": 0.15}
+        before_window = datetime(2024, 5, 6, 9, 30, tzinfo=timezone.utc)
+        inside_window = datetime(2024, 5, 6, 10, 30, tzinfo=timezone.utc)
+        self.assertEqual(
+            trades_due_for_close([trade], before_window, spreads, {"T5": 5.0}),
+            [],
+        )
+        self.assertEqual(
+            trades_due_for_close([trade], inside_window, spreads, {"T5": 5.0}),
+            [("T5", "spread")],
+        )
 
     def test_drawdown_detection(self) -> None:
         risk = RiskConfig(drawdown_enabled=True, drawdown_stop=5.0)
@@ -160,6 +217,36 @@ class AutomationLogicTests(unittest.TestCase):
         config = AppConfig.from_dict(data)
         self.assertEqual(config.primary_threads[0].weekdays, [1])
         self.assertEqual(config.wednesday_threads[0].weekdays, [2])
+
+    def test_thread_schedule_close_condition_defaults(self) -> None:
+        schedule = ThreadSchedule.from_dict(
+            {
+                "thread_id": "x1",
+                "close_condition": "unknown",
+                "close_window_start": "08:00",
+                "close_window_end": "09:30",
+                "min_combined_profit": 5,
+            },
+            default_id="x1",
+            default_name="Test",
+            weekdays=[0],
+        )
+        self.assertEqual(schedule.close_condition, "spread")
+        self.assertEqual(schedule.close_window_start, "08:00")
+        self.assertEqual(schedule.close_window_end, "09:30")
+
+        schedule_profit = ThreadSchedule.from_dict(
+            {
+                "thread_id": "x2",
+                "close_condition": "profit",
+                "min_combined_profit": 7.5,
+            },
+            default_id="x2",
+            default_name="Test2",
+            weekdays=[0],
+        )
+        self.assertEqual(schedule_profit.close_condition, "profit")
+        self.assertAlmostEqual(schedule_profit.min_combined_profit, 7.5)
 
 
 if __name__ == "__main__":
