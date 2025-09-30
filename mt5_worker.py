@@ -159,12 +159,16 @@ def _submit_market_order(
     # Fetch position details for entry price/time
     entry_price = None
     entry_time = None
+    commission = 0.0
+    swap = 0.0
     try:
         pos_det = MT5.positions_get(ticket=int(position_ticket))
         if pos_det:
             pos0 = pos_det[0]
             entry_price = float(getattr(pos0, "price_open", 0.0) or 0.0)
             entry_time = int(getattr(pos0, "time", 0) or 0)
+            commission = float(getattr(pos0, "commission", 0.0) or 0.0)
+            swap = float(getattr(pos0, "swap", 0.0) or 0.0)
     except Exception:
         pass
 
@@ -175,6 +179,8 @@ def _submit_market_order(
         "volume": float(volume),
         "entry_price": entry_price,
         "entry_time": entry_time,
+        "commission": commission,
+        "swap": swap,
     }
 
 
@@ -226,8 +232,42 @@ def _get_profit_by_ticket(position_ticket: int) -> Tuple[bool, Dict[str, Any]]:
             "volume": float(getattr(pos, "volume", 0.0) or 0.0),
             "entry_price": float(getattr(pos, "price_open", 0.0) or 0.0),
             "entry_time": int(getattr(pos, "time", 0) or 0),
+            "commission": float(getattr(pos, "commission", 0.0) or 0.0),
+            "swap": float(getattr(pos, "swap", 0.0) or 0.0),
         }
     return True, {"open": False, "profit": 0.0}
+
+
+def _get_quote(symbol: str) -> Tuple[bool, Dict[str, Any]]:
+    if not symbol:
+        return False, {"error": "Symbol required"}
+    ok, err = _ensure_symbol_selected(symbol)
+    if not ok:
+        return False, {"error": err}
+    tick = MT5.symbol_info_tick(symbol)
+    if tick is None:
+        return False, {"error": f"No tick data for symbol: {symbol}"}
+    bid = float(getattr(tick, "bid", 0.0) or 0.0)
+    ask = float(getattr(tick, "ask", 0.0) or 0.0)
+    return True, {
+        "symbol": symbol,
+        "bid": bid,
+        "ask": ask,
+        "spread": max(0.0, ask - bid),
+        "time": int(getattr(tick, "time", 0) or 0),
+    }
+
+
+def _get_account_overview() -> Tuple[bool, Dict[str, Any]]:
+    info = MT5.account_info()
+    if info is None:
+        return False, {"error": "Account not available"}
+    return True, {
+        "balance": float(getattr(info, "balance", 0.0) or 0.0),
+        "equity": float(getattr(info, "equity", 0.0) or 0.0),
+        "margin": float(getattr(info, "margin", 0.0) or 0.0),
+        "login": int(getattr(info, "login", 0) or 0),
+    }
 
 
 def worker_main(request_queue, response_queue, terminal_path: Optional[str] = None, label: str = "") -> None:
@@ -356,6 +396,21 @@ def worker_main(request_queue, response_queue, terminal_path: Optional[str] = No
                 elif cmd == "get_profit":
                     position_ticket = int(params.get("position_ticket", 0))
                     ok, data = _get_profit_by_ticket(position_ticket)
+                    if not ok:
+                        respond(req_id, "error", error=str(data.get("error")))
+                    else:
+                        respond(req_id, "ok", data=data)
+
+                elif cmd == "get_quote":
+                    symbol = params.get("symbol")
+                    ok, data = _get_quote(str(symbol or ""))
+                    if not ok:
+                        respond(req_id, "error", error=str(data.get("error")))
+                    else:
+                        respond(req_id, "ok", data=data)
+
+                elif cmd == "get_account_info":
+                    ok, data = _get_account_overview()
                     if not ok:
                         respond(req_id, "error", error=str(data.get("error")))
                     else:

@@ -1,0 +1,91 @@
+{
+  "timezone": "UTC",
+  "risk": {
+    "drawdown_enabled": false,
+    "drawdown_stop": 5.0
+  },
+  "primary_threads": [
+    {
+      "thread_id": "primary-1",
+      "name": "Primary Set 1",
+      "enabled": true,
+      "entry_start": "09:00",
+      "entry_end": "11:00",
+      "symbol1": "EURUSD",
+      "symbol2": "GBPUSD",
+      "lot1": 0.1,
+      "lot2": 0.1,
+      "direction": "buy_sell",
+      "max_entry_spread": 1.5,
+      "close_after_minutes": 180,
+      "max_exit_spread": 1.0,
+      "weekdays": [0, 1, 2, 3, 4]
+    },
+    {
+      "thread_id": "primary-2",
+      "name": "Primary Set 2",
+      "enabled": false,
+      "entry_start": "13:00",
+      "entry_end": "15:00",
+      "symbol1": "USDJPY",
+      "symbol2": "AUDUSD",
+      "lot1": 0.05,
+      "lot2": 0.05,
+      "direction": "sell_buy",
+      "max_entry_spread": 1.2,
+      "close_after_minutes": 120,
+      "max_exit_spread": 0.8,
+      "weekdays": [0, 1, 2, 3, 4]
+    }
+  ],
+  "wednesday_threads": [
+    {
+      "thread_id": "wednesday-1",
+      "name": "Wednesday Set 1",
+      "enabled": true,
+      "entry_start": "20:00",
+      "entry_end": "23:00",
+      "symbol1": "NZDUSD",
+      "symbol2": "AUDNZD",
+      "lot1": 0.08,
+      "lot2": 0.08,
+      "direction": "buy_sell",
+      "max_entry_spread": 1.6,
+      "close_after_minutes": 240,
+      "max_exit_spread": 1.2,
+      "weekdays": [2]
+    },
+    {
+      "thread_id": "wednesday-2",
+      "name": "Wednesday Set 2",
+      "enabled": false,
+      "entry_start": "00:30",
+      "entry_end": "02:00",
+      "symbol1": "EURCHF",
+      "symbol2": "GBPCHF",
+      "lot1": 0.05,
+      "lot2": 0.05,
+      "direction": "sell_sell",
+      "max_entry_spread": 1.0,
+      "close_after_minutes": 90,
+      "max_exit_spread": 0.7,
+      "weekdays": [2]
+    },
+    {
+      "thread_id": "wednesday-3",
+      "name": "Wednesday Set 3",
+      "enabled": false,
+      "entry_start": "05:00",
+      "entry_end": "07:00",
+      "symbol1": "USDCAD",
+      "symbol2": "CADJPY",
+      "lot1": 0.06,
+      "lot2": 0.06,
+      "direction": "buy_buy",
+      "max_entry_spread": 1.4,
+      "close_after_minutes": 180,
+      "max_exit_spread": 1.0,
+      "weekdays": [2]
+    }
+  ]
+}
