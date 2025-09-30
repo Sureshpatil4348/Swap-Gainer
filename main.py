@@ -34,7 +34,7 @@ from automation import (
 from persistence import Persistence
 
 
-DEFAULT_TERMINAL_1 = r"C:\Users\Public\Desktop\XM Global MT5.lnk"
+DEFAULT_TERMINAL_1 = r"C:\Users\Public\Desktop\XM MT5.lnk"
 DEFAULT_TERMINAL_2 = r"C:\Users\Public\Desktop\Tickmill MT5 Terminal.lnk"
 
 
