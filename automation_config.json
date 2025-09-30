@@ -19,6 +19,10 @@
       "max_entry_spread": 1.5,
       "close_after_minutes": 180,
       "max_exit_spread": 1.0,
+      "close_condition": "spread",
+      "min_combined_profit": 0.0,
+      "close_window_start": "",
+      "close_window_end": "",
       "weekdays": [0, 1, 2, 3, 4]
     },
     {
@@ -35,6 +39,10 @@
       "max_entry_spread": 1.2,
       "close_after_minutes": 120,
       "max_exit_spread": 0.8,
+      "close_condition": "profit",
+      "min_combined_profit": 12.5,
+      "close_window_start": "12:30",
+      "close_window_end": "17:00",
       "weekdays": [0, 1, 2, 3, 4]
     }
   ],
@@ -53,6 +61,10 @@
       "max_entry_spread": 1.6,
       "close_after_minutes": 240,
       "max_exit_spread": 1.2,
+      "close_condition": "spread_and_profit",
+      "min_combined_profit": 15.0,
+      "close_window_start": "20:30",
+      "close_window_end": "23:30",
       "weekdays": [2]
     },
     {
@@ -69,6 +81,10 @@
       "max_entry_spread": 1.0,
       "close_after_minutes": 90,
       "max_exit_spread": 0.7,
+      "close_condition": "spread",
+      "min_combined_profit": 0.0,
+      "close_window_start": "",
+      "close_window_end": "",
       "weekdays": [2]
     },
     {
@@ -85,6 +101,10 @@
       "max_entry_spread": 1.4,
       "close_after_minutes": 180,
       "max_exit_spread": 1.0,
+      "close_condition": "profit",
+      "min_combined_profit": 10.0,
+      "close_window_start": "05:30",
+      "close_window_end": "08:00",
       "weekdays": [2]
     }
   ]

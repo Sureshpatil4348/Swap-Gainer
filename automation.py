@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 
 def _default_primary_weekdays() -> List[int]:
@@ -12,6 +12,15 @@ def _default_primary_weekdays() -> List[int]:
 
 def _default_wednesday() -> List[int]:
     return [2]
+
+
+def _normalise_close_condition(value: Optional[object]) -> str:
+    valid = {"spread", "profit", "spread_and_profit"}
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in valid:
+            return lowered
+    return "spread"
 
 
 @dataclass
@@ -29,6 +38,10 @@ class ThreadSchedule:
     max_entry_spread: float = 1.5
     close_after_minutes: int = 120
     max_exit_spread: float = 1.0
+    close_condition: str = "spread"
+    min_combined_profit: float = 0.0
+    close_window_start: str = ""
+    close_window_end: str = ""
     weekdays: List[int] = field(default_factory=_default_primary_weekdays)
 
     def to_dict(self) -> Dict[str, object]:
@@ -46,6 +59,10 @@ class ThreadSchedule:
             "max_entry_spread": self.max_entry_spread,
             "close_after_minutes": self.close_after_minutes,
             "max_exit_spread": self.max_exit_spread,
+            "close_condition": self.close_condition,
+            "min_combined_profit": self.min_combined_profit,
+            "close_window_start": self.close_window_start,
+            "close_window_end": self.close_window_end,
             "weekdays": list(self.weekdays),
         }
 
@@ -101,6 +118,10 @@ class ThreadSchedule:
             max_entry_spread=float(data.get("max_entry_spread", 1.5) or 0.0),
             close_after_minutes=int(data.get("close_after_minutes", 120) or 0),
             max_exit_spread=float(data.get("max_exit_spread", 1.0) or 0.0),
+            close_condition=_normalise_close_condition(data.get("close_condition")),
+            min_combined_profit=float(data.get("min_combined_profit", 0.0) or 0.0),
+            close_window_start=str(data.get("close_window_start") or ""),
+            close_window_end=str(data.get("close_window_end") or ""),
             weekdays=wd,
         )
 
@@ -305,6 +326,10 @@ class TrackedTrade:
     symbols: Sequence[str]
     close_after_minutes: int
     max_exit_spread: float
+    close_condition: str = "spread"
+    min_combined_profit: float = 0.0
+    close_window_start: Optional[time] = None
+    close_window_end: Optional[time] = None
 
 
 def parse_time_string(value: str) -> Optional[time]:
@@ -364,21 +389,30 @@ def trades_due_for_close(
     trades: Iterable[TrackedTrade],
     now: datetime,
     spreads: Dict[str, float],
-) -> List[str]:
-    """
-    Determine which tracked trades are eligible to be closed at the given time.
-    
-    Each trade is eligible if its required minimum hold time (from `close_after_minutes`) has elapsed and, when `max_exit_spread` is greater than zero, every symbol in the trade has a known spread that is less than or equal to `max_exit_spread`. Trades with nonpositive `close_after_minutes` are treated as having no hold requirement. Trades missing any symbol spread are not eligible when an exit-spread limit is enforced.
-    
+    profits: Dict[str, float],
+) -> List[Tuple[str, str]]:
+    """Determine which tracked trades are eligible to be closed.
+
+    Eligibility requires that the configured minimum hold duration has elapsed
+    and that the configured close condition evaluates to ``True``. Supported
+    close conditions are ``"spread"`` (default behaviour), ``"profit"`` and
+    ``"spread_and_profit"``. Trades may optionally define a closing time window
+    via ``close_window_start`` / ``close_window_end``; if provided the current
+    timestamp must fall within that window for the trade to be considered.
+
     Parameters:
-        trades (Iterable[TrackedTrade]): Tracked trades to evaluate.
-        now (datetime): Current timestamp used to compare against each trade's `opened_at`.
-        spreads (Dict[str, float]): Mapping of symbol to current spread.
-    
+        trades: Tracked trades to evaluate.
+        now: Current timestamp used for comparisons.
+        spreads: Mapping of symbol to current spread values.
+        profits: Mapping of trade ID to the combined profit for that trade.
+
     Returns:
-        List[str]: List of trade IDs that meet the closing criteria.
+        List[Tuple[str, str]]: ``(trade_id, reason)`` pairs for each eligible
+        trade, where ``reason`` identifies the condition that triggered the
+        close.
     """
-    to_close: List[str] = []
+
+    to_close: List[Tuple[str, str]] = []
     for trade in trades:
         min_hold_minutes = max(int(trade.close_after_minutes), 0)
         hold_delta = timedelta(minutes=min_hold_minutes) if min_hold_minutes > 0 else None
@@ -386,20 +420,50 @@ def trades_due_for_close(
         if hold_delta is not None and now - trade.opened_at < hold_delta:
             continue
 
-        if trade.max_exit_spread > 0:
-            spreads_ok = []
+        start_window = trade.close_window_start
+        end_window = trade.close_window_end
+        if (start_window is not None or end_window is not None) and not _time_in_window(
+            now.time(),
+            start_window,
+            end_window,
+        ):
+            continue
+
+        condition = (trade.close_condition or "spread").lower()
+        if condition not in {"spread", "profit", "spread_and_profit"}:
+            condition = "spread"
+
+        spreads_ok = True
+        if condition in {"spread", "spread_and_profit"} and trade.max_exit_spread > 0:
             for sym in trade.symbols:
                 spread = spreads.get(sym)
-                if spread is None:
-                    spreads_ok.append(False)
-                else:
-                    spreads_ok.append(spread <= trade.max_exit_spread)
-            if not spreads_ok or not all(spreads_ok):
+                if spread is None or spread > trade.max_exit_spread:
+                    spreads_ok = False
+                    break
+
+        profit_ok = True
+        if condition in {"profit", "spread_and_profit"}:
+            threshold = max(float(trade.min_combined_profit), 0.0)
+            if threshold > 0:
+                combined_profit = profits.get(trade.trade_id)
+                if combined_profit is None or combined_profit < threshold:
+                    profit_ok = False
+
+        if condition == "profit":
+            if not profit_ok:
                 continue
+            reason = "profit"
+        elif condition == "spread_and_profit":
+            if not (spreads_ok and profit_ok):
+                continue
+            reason = "spread_and_profit"
+        else:
+            if not spreads_ok:
+                continue
+            reason = "spread"
 
-        to_close.append(trade.trade_id)
+        to_close.append((trade.trade_id, reason))
     return to_close
-
 
 def drawdown_breached(risk: RiskConfig, accounts: Sequence[Dict[str, float]]) -> bool:
     if not risk.drawdown_enabled:

@@ -6,6 +6,7 @@ import sys
 import uuid
 import time
 import threading
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, date
 from pathlib import Path
@@ -463,6 +464,7 @@ class App:
             "lots",
             "direction",
             "window",
+            "close_rule",
             "days",
             "next",
             "last",
@@ -480,6 +482,7 @@ class App:
             "lots": "Lots",
             "direction": "Direction",
             "window": "Entry Window",
+            "close_rule": "Close Rule",
             "days": "Days",
             "next": "Next Run",
             "last": "Last Run",
@@ -491,11 +494,17 @@ class App:
                 width = 170
             elif col == "window":
                 width = 160
+            elif col == "close_rule":
+                width = 220
             elif col == "schedule":
                 width = 190
             elif col == "days":
                 width = 110
-            self.schedule_tree.column(col, width=width, stretch=col in {"schedule", "pairs", "window"})
+            self.schedule_tree.column(
+                col,
+                width=width,
+                stretch=col in {"schedule", "pairs", "window", "close_rule"},
+            )
 
         schedule_scroll = ttk.Scrollbar(drives_frame, orient="vertical", command=self.schedule_tree.yview)
         schedule_scroll_x = ttk.Scrollbar(drives_frame, orient="horizontal", command=self.schedule_tree.xview)
@@ -551,6 +560,7 @@ class App:
             "schedule",
             "opened",
             "closed",
+            "reason",
             "p1",
             "p1_commission",
             "p1_swap",
@@ -572,6 +582,7 @@ class App:
             "schedule": "Schedule",
             "opened": "Opened At",
             "closed": "Closed At",
+            "reason": "Close Reason",
             "p1": "Account 1 P/L",
             "p1_commission": "Account 1 Commission",
             "p1_swap": "Account 1 Swap",
@@ -587,6 +598,8 @@ class App:
             width = 130
             if col == "schedule":
                 width = 200
+            elif col == "reason":
+                width = 180
             elif col in {"combined", "combined_commission", "combined_swap"}:
                 width = 150
             self.trade_history_tree.column(col, width=width, stretch=col in {"schedule", "combined"})
@@ -623,6 +636,7 @@ class App:
             closed_at = self._fmt_time(int(float(entry.get('closed_at', 0)) or 0))
             account1 = entry.get('account1', {}) if isinstance(entry.get('account1'), dict) else {}
             account2 = entry.get('account2', {}) if isinstance(entry.get('account2'), dict) else {}
+            reason = self._format_close_reason(str(entry.get('close_reason', '')))
             p1 = float(account1.get('profit', 0.0) or 0.0)
             p1_commission = float(account1.get('commission', 0.0) or 0.0)
             p1_swap = float(account1.get('swap', 0.0) or 0.0)
@@ -638,6 +652,7 @@ class App:
                     schedule,
                     opened_at,
                     closed_at,
+                    reason,
                     _fmt_profit(p1),
                     _fmt_profit(p1_commission),
                     _fmt_profit(p1_swap),
@@ -691,6 +706,25 @@ class App:
             close_text = f"{close_after} h" if close_after != '0' else 'n/a'
             self.config_tree.insert(node, 'end', text='Close After', values=(close_text,))
             self.config_tree.insert(node, 'end', text='Max Exit Spread', values=(self._format_number(thread.max_exit_spread),))
+            self.config_tree.insert(
+                node,
+                'end',
+                text='Close Condition',
+                values=(self._format_close_condition(thread),),
+            )
+            self.config_tree.insert(
+                node,
+                'end',
+                text='Close Window',
+                values=(self._format_close_window(thread),),
+            )
+            if thread.close_condition in {"profit", "spread_and_profit"}:
+                self.config_tree.insert(
+                    node,
+                    'end',
+                    text='Min Combined Profit',
+                    values=(self._format_money(thread.min_combined_profit),),
+                )
 
         def _update() -> None:
             tree = self.config_tree
@@ -948,6 +982,7 @@ class App:
             "thread_id",
             "opened_at",
             "closed_at",
+            "close_reason",
             "account1_symbol",
             "account1_lot",
             "account1_side",
@@ -994,6 +1029,7 @@ class App:
                 "thread_id": entry.get('thread_id', ''),
                 "opened_at": _fmt_ts(entry.get('opened_at', 0.0)),
                 "closed_at": _fmt_ts(entry.get('closed_at', 0.0)),
+                "close_reason": entry.get('close_reason', ''),
                 "account1_symbol": account1.get('symbol', ''),
                 "account1_lot": account1.get('lot', ''),
                 "account1_side": account1.get('side', ''),
@@ -1135,12 +1171,13 @@ class App:
 
     def _schedule_overview_row(
         self, schedule: ThreadSchedule, state: AutomationState, now: datetime
-    ) -> tuple[str, str, str, str, str, str, str, str, str]:
+    ) -> tuple[str, str, str, str, str, str, str, str, str, str]:
         status = "ENABLED" if schedule.enabled else "Disabled"
         pair_desc = f"{schedule.symbol1 or '-'} / {schedule.symbol2 or '-'}"
         lots = f"{self._format_number(schedule.lot1)} / {self._format_number(schedule.lot2)}"
         direction = self._direction_key_to_display(schedule.direction)
         window = self._format_entry_window(schedule)
+        close_rule = self._format_close_rule(schedule)
         days = self._format_weekdays(schedule.weekdays)
         last_run_iso = state.last_runs.get(schedule.thread_id)
         last_run_date = self._parse_iso_date(last_run_iso)
@@ -1160,6 +1197,7 @@ class App:
             lots,
             direction,
             window,
+            close_rule,
             days,
             next_run_display,
             last_run_display,
@@ -1174,6 +1212,64 @@ class App:
         if schedule.entry_end:
             return f"until {schedule.entry_end}"
         return "Configure window"
+
+    @staticmethod
+    def _format_close_window(schedule: ThreadSchedule) -> str:
+        start = (schedule.close_window_start or "").strip()
+        end = (schedule.close_window_end or "").strip()
+        if start and end:
+            return f"{start} - {end}"
+        if start:
+            return f"from {start}"
+        if end:
+            return f"until {end}"
+        return "Any time"
+
+    def _format_close_condition(self, schedule: ThreadSchedule) -> str:
+        condition = (schedule.close_condition or "spread").lower()
+        spread_limit = float(schedule.max_exit_spread or 0.0)
+        profit_target = float(schedule.min_combined_profit or 0.0)
+
+        spread_text = (
+            f"Spread ≤ {self._format_number(spread_limit)}" if spread_limit > 0 else "Spread unrestricted"
+        )
+        profit_text = (
+            f"Profit ≥ {self._format_money(profit_target)}" if profit_target > 0 else "Profit target"
+        )
+
+        if condition == "profit":
+            return profit_text
+        if condition == "spread_and_profit":
+            return f"{spread_text} & {profit_text}"
+        return spread_text
+
+    def _format_close_rule(self, schedule: ThreadSchedule) -> str:
+        parts: list[str] = []
+        hold_minutes = max(int(schedule.close_after_minutes or 0), 0)
+        if hold_minutes > 0:
+            parts.append(f"Hold ≥ {hold_minutes}m")
+        condition = self._format_close_condition(schedule)
+        if condition:
+            parts.append(condition)
+        window_desc = self._format_close_window(schedule)
+        if window_desc and window_desc != "Any time":
+            parts.append(f"Window {window_desc}")
+        return " | ".join(parts) if parts else "Immediate"
+
+    @staticmethod
+    def _format_close_reason(reason: str) -> str:
+        text = (reason or "").strip()
+        if not text:
+            return "—"
+        key = text.lower()
+        mapping = {
+            "manual": "Manual",
+            "auto:spread": "Automation (spread)",
+            "auto:profit": "Automation (profit)",
+            "auto:spread_and_profit": "Automation (spread & profit)",
+            "auto:drawdown": "Automation (drawdown)",
+        }
+        return mapping.get(key, text)
 
     @staticmethod
     def _format_weekdays(weekdays: Sequence[int]) -> str:
@@ -1404,9 +1500,14 @@ class App:
         self,
         now: datetime,
         config: AppConfig,
-    ) -> tuple[list[TrackedTrade], list[tuple[Optional[WorkerClient], str]]]:
+    ) -> tuple[
+        list[TrackedTrade],
+        list[tuple[Optional[WorkerClient], str]],
+        Dict[str, float],
+    ]:
         trades: list[TrackedTrade] = []
         requests: list[tuple[Optional[WorkerClient], str]] = []
+        profits: Dict[str, float] = {}
         thread_map: Dict[str, ThreadSchedule] = {
             thread.thread_id: thread
             for thread in (*config.primary_threads, *config.wednesday_threads)
@@ -1433,6 +1534,13 @@ class App:
                 schedule = thread_map.get(thread_id)
                 close_after = schedule.close_after_minutes if schedule else 0
                 max_exit = schedule.max_exit_spread if schedule else 0.0
+                close_condition = (schedule.close_condition if schedule else "spread") or "spread"
+                min_profit = float(schedule.min_combined_profit if schedule else 0.0 or 0.0)
+                window_start = parse_time_string(schedule.close_window_start) if schedule else None
+                window_end = parse_time_string(schedule.close_window_end) if schedule else None
+                profit1 = float(account1.get("last_profit", account1.get("profit", 0.0)) or 0.0)
+                profit2 = float(account2.get("last_profit", account2.get("profit", 0.0)) or 0.0)
+                profits[trade_id] = profit1 + profit2
                 trades.append(
                     TrackedTrade(
                         trade_id,
@@ -1440,21 +1548,25 @@ class App:
                         tuple(symbols),
                         close_after,
                         max_exit,
+                        close_condition,
+                        min_profit,
+                        window_start,
+                        window_end,
                     )
                 )
-        return trades, requests
+        return trades, requests, profits
 
-    def _close_pair_threadsafe(self, trade_id: str) -> None:
-        self._invoke_on_ui(lambda tid=trade_id: self._on_close_pair(tid))
+    def _close_pair_threadsafe(self, trade_id: str, reason: Optional[str] = None) -> None:
+        self._invoke_on_ui(lambda tid=trade_id, why=reason: self._on_close_pair(tid, why))
 
-    def _close_all_pairs_threadsafe(self) -> None:
-        self._invoke_on_ui(self._close_all_pairs)
+    def _close_all_pairs_threadsafe(self, reason: Optional[str] = None) -> None:
+        self._invoke_on_ui(lambda why=reason: self._close_all_pairs(why))
 
-    def _close_all_pairs(self) -> None:
+    def _close_all_pairs(self, reason: Optional[str] = None) -> None:
         with self._trade_lock:
             trade_ids = list(self.paired_trades.keys())
         for trade_id in trade_ids:
-            self._on_close_pair(trade_id)
+            self._on_close_pair(trade_id, reason)
 
     def _fetch_accounts(self) -> list[Dict[str, float]]:
         accounts: list[Dict[str, float]] = []
@@ -1493,23 +1605,35 @@ class App:
                 mark_schedule_triggered(state, schedule, now)
                 changed = True
 
-        trades, requests = self._gather_active_trades(now, config)
+        trades, requests, profits = self._gather_active_trades(now, config)
         if trades and connected:
             spreads = self._fetch_spreads(requests)
-            due_close = trades_due_for_close(trades, now, spreads)
+            due_close = trades_due_for_close(trades, now, spreads, profits)
             if due_close:
-                self._set_automation_status(
-                    f"Auto-close triggered for {len(due_close)} trade(s).", ok=False
-                )
-            for trade_id in due_close:
-                self._close_pair_threadsafe(trade_id)
+                counts = Counter(reason for _, reason in due_close)
+                parts: list[str] = []
+                labels = {
+                    "spread": "spread window",
+                    "profit": "profit target",
+                    "spread_and_profit": "spread & profit",
+                }
+                for key, value in counts.items():
+                    label = labels.get(key, key)
+                    parts.append(f"{value} via {label}")
+                detail = "; ".join(parts)
+                msg = f"Auto-close triggered for {len(due_close)} trade(s)."
+                if detail:
+                    msg = f"{msg} ({detail})"
+                self._set_automation_status(msg, ok=False)
+            for trade_id, reason in due_close:
+                self._close_pair_threadsafe(trade_id, reason=f"auto:{reason}")
 
         if connected:
             accounts = self._fetch_accounts()
             if accounts and drawdown_breached(config.risk, accounts):
                 if trades:
                     self._set_automation_status("Drawdown stop triggered. Closing all trades.", ok=False)
-                self._close_all_pairs_threadsafe()
+                self._close_all_pairs_threadsafe(reason="auto:drawdown")
 
         return changed
 
@@ -1562,7 +1686,7 @@ class App:
         except Exception as e:
             messagebox.showerror("Trade Error", str(e))
 
-    def _on_close_pair(self, trade_id: str) -> None:
+    def _on_close_pair(self, trade_id: str, reason: Optional[str] = None) -> None:
         with self._trade_lock:
             info = self.paired_trades.get(trade_id)
         if not info:
@@ -1610,6 +1734,8 @@ class App:
         account1['swap'] = p1_swap
         account2['swap'] = p2_swap
 
+        close_reason = (reason or "manual")
+
         history_entry = {
             'trade_id': trade_id,
             'schedule': info.get('schedule'),
@@ -1621,6 +1747,7 @@ class App:
             'combined_profit': p1_profit + p2_profit,
             'combined_commission': p1_commission + p2_commission,
             'combined_swap': p1_swap + p2_swap,
+            'close_reason': close_reason,
         }
 
         try:
