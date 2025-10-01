@@ -124,11 +124,8 @@ class ScrollableTable(ttk.Frame):
         self.scroll_x = ttk.Scrollbar(self, orient="horizontal", command=self.canvas.xview)
         self.inner = ttk.Frame(self.canvas)
 
-        self.inner.bind(
-            "<Configure>",
-            lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")),
-        )
-        self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
+        self.inner.bind("<Configure>", lambda e: self._update_scrollregion())
+        self._inner_window = self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
         self.canvas.configure(yscrollcommand=self.scroll_y.set, xscrollcommand=self.scroll_x.set)
         self.canvas.bind("<Shift-MouseWheel>", self._on_shift_mousewheel)
         self.bind("<Shift-MouseWheel>", self._on_shift_mousewheel)
@@ -144,7 +141,7 @@ class ScrollableTable(ttk.Frame):
         for c, col in enumerate(columns):
             lbl = ttk.Label(self.inner, text=col, font=("Segoe UI", 9, "bold"))
             lbl.grid(row=0, column=c, sticky="nsew", padx=4, pady=(2, 6))
-            self.inner.columnconfigure(c, weight=1)
+            self.inner.columnconfigure(c, weight=0, minsize=140)
 
         self._next_row = 1
         self._rows: Dict[str, Dict[str, Any]] = {}
@@ -154,6 +151,12 @@ class ScrollableTable(ttk.Frame):
         if delta:
             self.canvas.xview_scroll(int(-1 * (delta / 120)), "units")
         return "break"
+
+    def _update_scrollregion(self) -> None:
+        self.canvas.update_idletasks()
+        bbox = self.canvas.bbox("all")
+        if bbox:
+            self.canvas.configure(scrollregion=bbox)
 
     def add_row(
         self,
@@ -191,6 +194,7 @@ class ScrollableTable(ttk.Frame):
             "row_index": self._next_row,
         }
         self._next_row += 1
+        self._update_scrollregion()
 
     def set_metrics(self, row_id: str, metrics: Dict[str, float]) -> None:
         row = self._rows.get(row_id)
@@ -218,6 +222,7 @@ class ScrollableTable(ttk.Frame):
                 pass
         if row.get("button"):
             row["button"].destroy()
+        self._update_scrollregion()
 
 
 class AutomationRunner:
@@ -304,6 +309,7 @@ class App:
         self.account1_equity_var = tk.StringVar(value="Equity: --")
         self.account2_balance_var = tk.StringVar(value="Balance: --")
         self.account2_equity_var = tk.StringVar(value="Equity: --")
+        self.utc_time_var = tk.StringVar(value="UTC Time: --")
 
         self.automation_status_label = None
         self.schedule_tree = None
@@ -320,6 +326,8 @@ class App:
         self._schedule_profit_updates()
 
         self.automation_runner.start()
+
+        self._update_utc_clock()
 
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
@@ -366,6 +374,10 @@ class App:
         )
         ttk.Label(account_summary, textvariable=self.account2_equity_var).grid(
             row=1, column=2, sticky="w", padx=(8, 0), pady=2
+        )
+
+        ttk.Label(top, textvariable=self.utc_time_var, font=("Segoe UI", 10, "bold")).grid(
+            row=4, column=0, columnspan=4, sticky="w", padx=6, pady=(4, 2)
         )
 
         body_container = ttk.Frame(self.root)
@@ -602,7 +614,7 @@ class App:
                 width = 180
             elif col in {"combined", "combined_commission", "combined_swap"}:
                 width = 150
-            self.trade_history_tree.column(col, width=width, stretch=col in {"schedule", "combined"})
+            self.trade_history_tree.column(col, width=width, minwidth=width, stretch=False)
 
         history_scroll = ttk.Scrollbar(history_frame, orient="vertical", command=self.trade_history_tree.yview)
         history_scroll_x = ttk.Scrollbar(history_frame, orient="horizontal", command=self.trade_history_tree.xview)
@@ -1783,6 +1795,16 @@ class App:
 
     def _schedule_profit_updates(self) -> None:
         self.root.after(800, self._update_profits)
+
+    def _update_utc_clock(self) -> None:
+        try:
+            now = datetime.utcnow()
+            self.utc_time_var.set(now.strftime("UTC Time: %Y-%m-%d %H:%M:%S"))
+        except Exception:
+            self.utc_time_var.set("UTC Time: --")
+        finally:
+            if self.root.winfo_exists():
+                self.root.after(1000, self._update_utc_clock)
 
     def _update_profits(self) -> None:
         try:
