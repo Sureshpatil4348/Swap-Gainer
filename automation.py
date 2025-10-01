@@ -391,25 +391,19 @@ def trades_due_for_close(
     spreads: Dict[str, float],
     profits: Dict[str, float],
 ) -> List[Tuple[str, str]]:
-    """Determine which tracked trades are eligible to be closed.
-
-    Eligibility requires that the configured minimum hold duration has elapsed
-    and that the configured close condition evaluates to ``True``. Supported
-    close conditions are ``"spread"`` (default behaviour), ``"profit"`` and
-    ``"spread_and_profit"``. Trades may optionally define a closing time window
-    via ``close_window_start`` / ``close_window_end``; if provided the current
-    timestamp must fall within that window for the trade to be considered.
-
+    """
+    Determine which tracked trades are eligible to be closed.
+    
+    Evaluates each trade against its minimum hold time, optional close time window, configured close condition (`"spread"`, `"profit"`, or `"spread_and_profit"`), maximum exit spread, and minimum combined profit. Normalises unknown close conditions to `"spread"`.
+    
     Parameters:
-        trades: Tracked trades to evaluate.
-        now: Current timestamp used for comparisons.
-        spreads: Mapping of symbol to current spread values.
-        profits: Mapping of trade ID to the combined profit for that trade.
-
+        trades: Iterable of TrackedTrade objects to evaluate.
+        now: Current datetime used for timing comparisons.
+        spreads: Mapping from symbol to its current spread.
+        profits: Mapping from trade ID to the current combined profit for that trade.
+    
     Returns:
-        List[Tuple[str, str]]: ``(trade_id, reason)`` pairs for each eligible
-        trade, where ``reason`` identifies the condition that triggered the
-        close.
+        List of `(trade_id, reason)` pairs for trades that meet their close criteria, where `reason` indicates which condition triggered the close (one of `"spread"`, `"profit"`, or `"spread_and_profit"`).
     """
 
     to_close: List[Tuple[str, str]] = []
@@ -466,27 +460,17 @@ def trades_due_for_close(
     return to_close
 
 def drawdown_breached(risk: RiskConfig, accounts: Sequence[Dict[str, float]]) -> bool:
-    """Check if drawdown limit is breached on ANY individual account.
+    """
+    Determine whether any individual account has exceeded the configured drawdown threshold.
     
-    Drawdown is calculated as: (Balance - Equity) / Balance * 100
-    This measures current loss from the account's balance.
+    If drawdown limiting is disabled or no accounts are provided, this returns False. For each account with a positive numeric balance, computes drawdown as (balance - equity) / balance * 100 and compares it to abs(risk.drawdown_stop); returns True immediately when any account's drawdown is greater than or equal to that threshold.
     
-    If ANY account's equity drops below (Balance * (1 - drawdown_stop/100)),
-    returns True to close all trades.
+    Parameters:
+        risk (RiskConfig): Risk configuration containing `drawdown_enabled` and `drawdown_stop` (percentage).
+        accounts (Sequence[Dict[str, float]]): Sequence of account dictionaries with numeric 'balance' and 'equity' keys.
     
-    Args:
-        risk: Risk configuration with drawdown_enabled and drawdown_stop (%)
-        accounts: List of account dicts with 'balance' and 'equity' keys
-        
     Returns:
-        True if ANY account has breached the drawdown limit
-        
-    Example:
-        Account balance: $10,000
-        drawdown_stop: 5.0 (%)
-        Current equity: $9,400
-        Drawdown = (10000 - 9400) / 10000 * 100 = 6%
-        Result: BREACHED (6% > 5%)
+        bool: `True` if any account's drawdown percentage is greater than or equal to the configured stop percentage, `False` otherwise.
     """
     if not risk.drawdown_enabled:
         return False
@@ -520,6 +504,17 @@ def spreads_within_entry_limit(
     spreads: Dict[str, float],
     max_spread: float,
 ) -> bool:
+    """
+    Determine whether all specified symbols have known spreads that do not exceed the allowed maximum.
+    
+    Parameters:
+    	symbols (Sequence[str]): Symbols to check.
+    	spreads (Dict[str, float]): Mapping of symbol to its current spread; missing entries are treated as unknown.
+    	max_spread (float): Maximum allowed spread; a value less than or equal to 0 disables the limit and causes the function to return `true`.
+    
+    Returns:
+    	`true` if max_spread <= 0 or every symbol has a known spread that is less than or equal to max_spread, `false` otherwise.
+    """
     if max_spread <= 0:
         return True
     for sym in symbols:
