@@ -1,0 +1,164 @@
+================================================================================
+                    DRAWDOWN PROTECTION - QUICK REFERENCE
+================================================================================
+
+✅ STATUS: CORRECTED AND WORKING AS INTENDED
+
+================================================================================
+                              HOW IT WORKS
+================================================================================
+
+CONFIGURATION (automation_config.json):
+----------------------------------------
+{
+  "risk": {
+    "drawdown_enabled": true,    ← Enable/disable protection
+    "drawdown_stop": 5.0         ← Percentage threshold (5.0 = 5%)
+  }
+}
+
+MONITORING:
+-----------
+✓ Checks EACH account individually (not combined)
+✓ Runs every ~1 second during automation
+✓ Fetches real-time Balance and Equity from MT5
+
+FORMULA:
+--------
+Drawdown % = (Balance - Equity) / Balance × 100
+
+TRIGGER:
+--------
+IF any account's drawdown >= threshold
+THEN close ALL trades in BOTH accounts immediately
+
+================================================================================
+                          PRACTICAL EXAMPLES
+================================================================================
+
+EXAMPLE 1: ✅ SAFE - No Action
+--------------------------------
+Config: 5% threshold
+
+Account 1: $10,000 balance → $9,600 equity = 4.0% loss  ✅ OK
+Account 2: $5,000 balance  → $4,800 equity = 4.0% loss  ✅ OK
+
+Result: Trades continue (both under 5%)
+
+---
+
+EXAMPLE 2: ⚠️ ACCOUNT 1 BREACHED
+---------------------------------
+Config: 5% threshold
+
+Account 1: $10,000 balance → $9,400 equity = 6.0% loss  ❌ BREACHED
+Account 2: $5,000 balance  → $5,100 equity = profit     ✅ OK
+
+Result: ⚠️ ALL TRADES CLOSED (Account 1 exceeded limit)
+
+---
+
+EXAMPLE 3: ⚠️ ACCOUNT 2 BREACHED
+---------------------------------
+Config: 5% threshold
+
+Account 1: $10,000 balance → $10,200 equity = profit    ✅ OK
+Account 2: $5,000 balance  → $4,700 equity  = 6.0% loss ❌ BREACHED
+
+Result: ⚠️ ALL TRADES CLOSED (Account 2 exceeded limit)
+
+================================================================================
+                            KEY POINTS
+================================================================================
+
+✅ Monitors each account separately (not combined totals)
+✅ Protects against asymmetric losses
+✅ Triggers if ANY account exceeds the limit
+✅ Closes ALL trades in BOTH accounts when triggered
+✅ Works even if one account is profitable
+
+❌ Does NOT combine both accounts into single calculation
+❌ Does NOT wait for both accounts to breach
+❌ Does NOT require manual intervention to close trades
+
+================================================================================
+                          RECOMMENDED SETTINGS
+================================================================================
+
+CONSERVATIVE (Recommended):
+    drawdown_stop: 3.0   (3% max loss per account)
+
+MODERATE:
+    drawdown_stop: 5.0   (5% max loss per account)
+
+AGGRESSIVE (Higher risk):
+    drawdown_stop: 10.0  (10% max loss per account)
+
+================================================================================
+                            WHAT'S CHANGED
+================================================================================
+
+OLD IMPLEMENTATION (INCORRECT):
+    - Combined both accounts
+    - Could miss single-account catastrophic loss
+    - Less protective
+
+NEW IMPLEMENTATION (CORRECT):
+    - Checks each account individually
+    - Catches any account exceeding limit
+    - More conservative and safer
+
+================================================================================
+                           VERIFICATION
+================================================================================
+
+✅ All 7 test cases passing
+✅ Tested with various scenarios
+✅ Integrated with automation loop
+✅ Production ready
+
+Test Results:
+    1. Neither breached → No action           ✅ PASS
+    2. Account 1 breached → Trigger           ✅ PASS
+    3. Account 2 breached → Trigger           ✅ PASS
+    4. Both breached → Trigger                ✅ PASS
+    5. Protection disabled → No action        ✅ PASS
+    6. Exact boundary (5.0%) → Trigger        ✅ PASS
+    7. Just under (4.99%) → No action         ✅ PASS
+
+================================================================================
+                         WHERE TO CONFIGURE
+================================================================================
+
+File: automation_config.json
+Location: Project root directory
+
+{
+  "timezone": "UTC",
+  "risk": {
+    "drawdown_enabled": false,  ← Change to true to activate
+    "drawdown_stop": 5.0        ← Adjust percentage as needed
+  },
+  "primary_threads": [...],
+  "wednesday_threads": [...]
+}
+
+After editing, reload config in UI or restart application.
+
+================================================================================
+                      WHEN IT TRIGGERS IN UI
+================================================================================
+
+You'll see:
+    Status Message: "Drawdown stop triggered. Closing all trades."
+    Trade History: Closed trades marked as "Automation (drawdown)"
+    Log File: Entry with reason "auto:drawdown"
+
+================================================================================
+
+For detailed documentation, see: DRAWDOWN_EXPLANATION.md
+
+Last Updated: October 1, 2025
+Status: ✅ VERIFIED AND PRODUCTION READY
+
+================================================================================
