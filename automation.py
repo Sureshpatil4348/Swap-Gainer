@@ -466,17 +466,53 @@ def trades_due_for_close(
     return to_close
 
 def drawdown_breached(risk: RiskConfig, accounts: Sequence[Dict[str, float]]) -> bool:
+    """Check if drawdown limit is breached on ANY individual account.
+    
+    Drawdown is calculated as: (Balance - Equity) / Balance * 100
+    This measures current loss from the account's balance.
+    
+    If ANY account's equity drops below (Balance * (1 - drawdown_stop/100)),
+    returns True to close all trades.
+    
+    Args:
+        risk: Risk configuration with drawdown_enabled and drawdown_stop (%)
+        accounts: List of account dicts with 'balance' and 'equity' keys
+        
+    Returns:
+        True if ANY account has breached the drawdown limit
+        
+    Example:
+        Account balance: $10,000
+        drawdown_stop: 5.0 (%)
+        Current equity: $9,400
+        Drawdown = (10000 - 9400) / 10000 * 100 = 6%
+        Result: BREACHED (6% > 5%)
+    """
     if not risk.drawdown_enabled:
         return False
-    total_balance = 0.0
-    total_equity = 0.0
-    for acc in accounts:
-        total_balance += float(acc.get("balance", 0.0) or 0.0)
-        total_equity += float(acc.get("equity", 0.0) or 0.0)
-    if total_balance <= 0:
+    
+    if not accounts:
         return False
-    drawdown_pct = ((total_equity - total_balance) / total_balance) * 100.0
-    return drawdown_pct <= -abs(risk.drawdown_stop)
+    
+    threshold_pct = abs(float(risk.drawdown_stop))
+    
+    # Check EACH account individually
+    for acc in accounts:
+        balance = float(acc.get("balance", 0.0) or 0.0)
+        equity = float(acc.get("equity", 0.0) or 0.0)
+        
+        # Skip if balance is invalid
+        if balance <= 0:
+            continue
+        
+        # Calculate drawdown: how much equity is below balance
+        drawdown_pct = ((balance - equity) / balance) * 100.0
+        
+        # If THIS account has exceeded the drawdown limit
+        if drawdown_pct >= threshold_pct:
+            return True
+    
+    return False
 
 
 def spreads_within_entry_limit(

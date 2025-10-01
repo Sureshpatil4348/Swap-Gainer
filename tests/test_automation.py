@@ -206,11 +206,35 @@ class AutomationLogicTests(unittest.TestCase):
 
     def test_drawdown_detection(self) -> None:
         risk = RiskConfig(drawdown_enabled=True, drawdown_stop=5.0)
-        accounts = [{"balance": 1000, "equity": 930}, {"balance": 2000, "equity": 1980}]
-        # Combined equity 2910 vs balance 3000 => -3%, not breached
+        
+        # Test 1: Neither account breached (both under 5% loss)
+        # Account 1: (1000 - 960) / 1000 = 4% drawdown - OK
+        # Account 2: (2000 - 1920) / 2000 = 4% drawdown - OK
+        accounts = [{"balance": 1000, "equity": 960}, {"balance": 2000, "equity": 1920}]
         self.assertFalse(drawdown_breached(risk, accounts))
+        
+        # Test 2: Account 1 breached (6% loss)
+        # Account 1: (1000 - 940) / 1000 = 6% drawdown - BREACHED
+        # Account 2: (2000 - 1980) / 2000 = 1% drawdown - OK
+        accounts = [{"balance": 1000, "equity": 940}, {"balance": 2000, "equity": 1980}]
+        self.assertTrue(drawdown_breached(risk, accounts))
+        
+        # Test 3: Account 2 breached (10% loss)
+        # Account 1: (1000 - 990) / 1000 = 1% drawdown - OK
+        # Account 2: (2000 - 1800) / 2000 = 10% drawdown - BREACHED
+        accounts = [{"balance": 1000, "equity": 990}, {"balance": 2000, "equity": 1800}]
+        self.assertTrue(drawdown_breached(risk, accounts))
+        
+        # Test 4: Both accounts breached
+        # Account 1: (1000 - 900) / 1000 = 10% drawdown - BREACHED
+        # Account 2: (2000 - 1800) / 2000 = 10% drawdown - BREACHED
         accounts = [{"balance": 1000, "equity": 900}, {"balance": 2000, "equity": 1800}]
         self.assertTrue(drawdown_breached(risk, accounts))
+        
+        # Test 5: Disabled drawdown should never trigger
+        risk_disabled = RiskConfig(drawdown_enabled=False, drawdown_stop=5.0)
+        accounts = [{"balance": 1000, "equity": 500}, {"balance": 2000, "equity": 1000}]
+        self.assertFalse(drawdown_breached(risk_disabled, accounts))
 
     def test_spread_entry_check(self) -> None:
         spreads = {"EURUSD": 0.6, "USDJPY": 0.7}
