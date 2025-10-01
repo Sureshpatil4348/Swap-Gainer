@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import threading
 import unittest
 from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
@@ -20,6 +21,7 @@ from automation import (
     spreads_within_entry_limit,
     trades_due_for_close,
 )
+from main import App
 
 
 class AutomationLogicTests(unittest.TestCase):
@@ -129,6 +131,53 @@ class AutomationLogicTests(unittest.TestCase):
             trades_due_for_close([trade], self.now, spreads, {"T4": 12.5}),
             [("T4", "profit")],
         )
+
+    def test_gather_active_trades_uses_running_profit(self) -> None:
+        schedule = ThreadSchedule(
+            thread_id="primary-1",
+            name="Primary",
+            enabled=True,
+            symbol1="EURUSD",
+            symbol2="USDJPY",
+            close_condition="profit",
+            min_combined_profit=10.0,
+        )
+        config = AppConfig(
+            timezone="UTC",
+            primary_threads=[schedule],
+            wednesday_threads=[],
+            risk=RiskConfig(),
+        )
+        app = App.__new__(App)
+        app._trade_lock = threading.Lock()
+        now = datetime(2024, 5, 6, 12, 0, tzinfo=timezone.utc)
+        app.paired_trades = {
+            "T100": {
+                "opened_at": now.timestamp(),
+                "thread_id": "primary-1",
+                "account1": {
+                    "symbol": "EURUSD",
+                    "last_profit": 8.0,
+                    "last_commission": -1.0,
+                    "last_swap": -0.5,
+                },
+                "account2": {
+                    "symbol": "USDJPY",
+                    "last_profit": 5.0,
+                    "last_commission": -0.75,
+                    "last_swap": 0.25,
+                },
+            }
+        }
+        app.worker1 = None
+        app.worker2 = None
+
+        trades, requests, profits = app._gather_active_trades(now, config)
+        self.assertEqual(len(trades), 1)
+        self.assertEqual(len(requests), 2)
+        # Combined profit should use the running PnL values only.
+        expected_profit = 8.0 + 5.0
+        self.assertAlmostEqual(profits["T100"], expected_profit)
 
     def test_trades_due_for_close_respects_close_window(self) -> None:
         opened = self.now - timedelta(minutes=180)
