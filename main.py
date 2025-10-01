@@ -118,6 +118,13 @@ class WorkerClient:
 
 class ScrollableTable(ttk.Frame):
     def __init__(self, master: tk.Misc, columns: list[str]) -> None:
+        """
+        Create a scrollable table container with a canvas-backed inner frame, vertical and horizontal scrollbars, and header columns.
+        
+        Parameters:
+            master (tk.Misc): Parent Tkinter widget to attach the scrollable table to.
+            columns (list[str]): Sequence of header labels to create top-row column headers; each column is given a minimum width and is prepared for later row insertion.
+        """
         super().__init__(master)
         self.canvas = tk.Canvas(self, borderwidth=0, highlightthickness=0)
         self.scroll_y = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
@@ -147,12 +154,26 @@ class ScrollableTable(ttk.Frame):
         self._rows: Dict[str, Dict[str, Any]] = {}
 
     def _on_shift_mousewheel(self, event: tk.Event) -> str:
+        """
+        Handle Shift+MouseWheel events to scroll the canvas horizontally.
+        
+        Parameters:
+            event (tk.Event): Mouse wheel event (expected to include a `delta` attribute) generated while Shift is pressed.
+        
+        Returns:
+            str: The literal "break" to stop further Tkinter event propagation.
+        """
         delta = getattr(event, "delta", 0)
         if delta:
             self.canvas.xview_scroll(int(-1 * (delta / 120)), "units")
         return "break"
 
     def _update_scrollregion(self) -> None:
+        """
+        Refresh the canvas scroll region to match the current bounding box of its contents.
+        
+        Processes any pending geometry updates before recomputing the bounding box and, if available, applies it as the canvas scrollregion.
+        """
         self.canvas.update_idletasks()
         bbox = self.canvas.bbox("all")
         if bbox:
@@ -165,6 +186,15 @@ class ScrollableTable(ttk.Frame):
         dynamic_fields: Dict[str, int],
         close_callback,
     ) -> None:
+        """
+        Add a new row of cells and a "Close" button to the scrollable table and register it for later updates.
+        
+        Parameters:
+            row_id (str): Unique identifier for the row used as the key in the table's internal row map.
+            values (list[Any]): Sequence of cell values; the last element is reserved for the "Close" button column.
+            dynamic_fields (Dict[str, int]): Mapping from dynamic field keys to their column index; columns listed here are created as labels that can be updated later.
+            close_callback (callable): Callback invoked with `row_id` when the row's "Close" button is pressed.
+        """
         widgets = []
         dynamic_labels: Dict[str, ttk.Label] = {}
         index_to_key = {idx: key for key, idx in dynamic_fields.items()}
@@ -197,6 +227,13 @@ class ScrollableTable(ttk.Frame):
         self._update_scrollregion()
 
     def set_metrics(self, row_id: str, metrics: Dict[str, float]) -> None:
+        """
+        Update dynamic metric labels for a table row.
+        
+        Parameters:
+            row_id (str): Identifier of the row whose dynamic labels should be updated. If no row with this id exists, the call is a no-op.
+            metrics (Dict[str, float]): Mapping of metric keys to numeric values. For each key that matches a dynamic label on the row, the label's text is set to the value formatted with two decimal places; if formatting fails the raw value is used.
+        """
         row = self._rows.get(row_id)
         if not row:
             return
@@ -210,6 +247,14 @@ class ScrollableTable(ttk.Frame):
                     label.configure(text=str(value))
 
     def remove_row(self, row_id: str) -> None:
+        """
+        Remove a previously added row and its associated widgets from the table.
+        
+        Deletes the row identified by `row_id` from the internal row registry, destroys all Tk widgets held for that row (including dynamic labels and any action button), and updates the canvas scroll region. If `row_id` is not present, the call is a no-op.
+        
+        Parameters:
+            row_id (str): Identifier of the row to remove.
+        """
         row = self._rows.pop(row_id, None)
         if not row:
             return
@@ -270,6 +315,20 @@ class App:
     MAGIC_BASE = 973451000
 
     def __init__(self, root: tk.Tk) -> None:
+        """
+        Initialize the application with the given Tk root, restore persisted state/configuration, build the user interface, and start background automation.
+        
+        This constructor:
+        - Stores the provided Tk root and configures the main window.
+        - Loads persistence, configuration, and persisted automation state.
+        - Initializes runtime state (workers, connection flags, trade counter, paired trades, trade history and locks).
+        - Creates Tkinter variables for UI-bound values (terminal paths, pair/lots, account summaries, UTC clock).
+        - Builds the UI, restores active trades and trade counter from persisted state, refreshes schedule overview and trade history display, schedules periodic profit updates, starts the AutomationRunner background loop, and starts the UTC clock updater.
+        - Registers the window close handler to perform cleanup via on_close.
+        
+        Parameters:
+            root (tk.Tk): The main Tkinter application root window used to create and manage the UI.
+        """
         self.root = root
         self.root.title("Dual MT5 Bridge - Simultaneous Trading")
         self.root.geometry("980x560")
@@ -332,6 +391,18 @@ class App:
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
     def _build_ui(self) -> None:
+        """
+        Constructs and lays out the main Tkinter user interface for the application.
+        
+        Creates the top connection frame (terminal path entries, connect button, connection status labels,
+        automation status and account summaries including a UTC time label), a scrollable main body, and
+        the primary UI sections placed inside it: "Active Trades" (uses ScrollableTable), "Active Drives"
+        (schedule overview Treeview), "Configuration Snapshot" (Treeview with a Reload button), and
+        "Trade History" (Treeview). Also sets up scrolling canvases, mousewheel and shift-mousewheel
+        bindings (including horizontal scroll handlers), column/row weightings, and stores important
+        widget references (e.g. _scroll_canvas, _scrollable_body, table, schedule_tree, config_tree,
+        trade_history_tree, automation_status_label, status1, status2) for use by other methods.
+        """
         pad = {"padx": 6, "pady": 4}
 
         top = ttk.LabelFrame(self.root, text="Connections")
@@ -1794,9 +1865,17 @@ class App:
 
 
     def _schedule_profit_updates(self) -> None:
+        """
+        Schedule a profit-display refresh to run after 800 milliseconds on the Tkinter event loop.
+        """
         self.root.after(800, self._update_profits)
 
     def _update_utc_clock(self) -> None:
+        """
+        Update the UTC time display in the UI and schedule the next update.
+        
+        Sets self.utc_time_var to the current UTC timestamp formatted as "UTC Time: YYYY-MM-DD HH:MM:SS". If an error occurs while obtaining or formatting the time, sets the display to "UTC Time: --". After updating the value, re-schedules this method to run again in 1000 ms if the root window still exists.
+        """
         try:
             now = datetime.utcnow()
             self.utc_time_var.set(now.strftime("UTC Time: %Y-%m-%d %H:%M:%S"))
@@ -1807,6 +1886,11 @@ class App:
                 self.root.after(1000, self._update_utc_clock)
 
     def _update_profits(self) -> None:
+        """
+        Update cached profit/commission/swap for all active paired trades, refresh the UI metrics, and finalize any trades that have closed.
+        
+        For each paired trade, query each connected worker for current profit information (falling back to cached last values on error), update the in-memory profit cache, and update the table row metrics shown in the UI. If both sides of a pair are detected as closed, remove the pair from active trades, construct a history record with final profit/commission/swap values, and append it to trade history. Always refresh displayed account summaries and reschedule the next periodic profit update before returning.
+        """
         try:
             with self._trade_lock:
                 snapshot = {tid: dict(info) for tid, info in self.paired_trades.items()}
