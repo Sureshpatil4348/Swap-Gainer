@@ -141,7 +141,8 @@ class ScrollableTable(ttk.Frame):
         for c, col in enumerate(columns):
             lbl = ttk.Label(self.inner, text=col, font=("Segoe UI", 9, "bold"))
             lbl.grid(row=0, column=c, sticky="nsew", padx=4, pady=(2, 6))
-            self.inner.columnconfigure(c, weight=0, minsize=140)
+            minsize = 100 if col.lower().startswith("close") else 140
+            self.inner.columnconfigure(c, weight=0, minsize=minsize)
 
         self._next_row = 1
         self._rows: Dict[str, Dict[str, Any]] = {}
@@ -169,23 +170,24 @@ class ScrollableTable(ttk.Frame):
         dynamic_labels: Dict[str, ttk.Label] = {}
         index_to_key = {idx: key for key, idx in dynamic_fields.items()}
 
-        for c, val in enumerate(values[:-1]):  # except last column (Close button)
+        # Close button in the first column
+        btn = ttk.Button(self.inner, text="Close", command=lambda: close_callback(row_id))
+        btn.grid(row=self._next_row, column=0, sticky="nsew", padx=4, pady=2)
+        btn.bind("<Shift-MouseWheel>", self._on_shift_mousewheel)
+
+        for c, val in enumerate(values):
+            column_index = c + 1  # shift by one to account for the close button column
             if c in index_to_key:
                 lbl = ttk.Label(self.inner, text=str(val))
-                lbl.grid(row=self._next_row, column=c, sticky="nsew", padx=4, pady=2)
+                lbl.grid(row=self._next_row, column=column_index, sticky="nsew", padx=4, pady=2)
                 lbl.bind("<Shift-MouseWheel>", self._on_shift_mousewheel)
                 dynamic_labels[index_to_key[c]] = lbl
                 widgets.append(lbl)
             else:
                 w = ttk.Label(self.inner, text=str(val))
-                w.grid(row=self._next_row, column=c, sticky="nsew", padx=4, pady=2)
+                w.grid(row=self._next_row, column=column_index, sticky="nsew", padx=4, pady=2)
                 w.bind("<Shift-MouseWheel>", self._on_shift_mousewheel)
                 widgets.append(w)
-
-        # Close button
-        btn = ttk.Button(self.inner, text="Close", command=lambda: close_callback(row_id))
-        btn.grid(row=self._next_row, column=len(values) - 1, sticky="nsew", padx=4, pady=2)
-        btn.bind("<Shift-MouseWheel>", self._on_shift_mousewheel)
 
         self._rows[row_id] = {
             "widgets": widgets,
@@ -317,6 +319,7 @@ class App:
         self.trade_history_tree = None
         self._scroll_canvas = None
         self._scrollable_body = None
+        self._scroll_window_id: Optional[int] = None
 
         self._build_ui()
         self._restore_active_trades()
@@ -390,9 +393,10 @@ class App:
         scrollable_body = ttk.Frame(canvas)
         scrollable_body.bind(
             "<Configure>",
-            lambda event: canvas.configure(scrollregion=canvas.bbox("all")),
+            lambda event: self._refresh_body_scrollregion(),
         )
-        canvas.create_window((0, 0), window=scrollable_body, anchor="nw")
+        self._scroll_window_id = canvas.create_window((0, 0), window=scrollable_body, anchor="nw")
+        canvas.bind("<Configure>", self._on_scroll_canvas_configure)
 
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
@@ -438,6 +442,8 @@ class App:
         self.table = ScrollableTable(
             active_trades,
             columns=[
+                "Close (both)",
+                "Combined P/L",
                 "Trade ID",
                 "Account 1: Pair",
                 "Account 1: Lot",
@@ -456,8 +462,6 @@ class App:
                 "Side (Buy/Sell)",
                 "Combined Commission",
                 "Combined Swap",
-                "Combined Net Profit",
-                "Close (both)",
             ],
         )
         self.table.grid(row=0, column=0, sticky="nsew")
@@ -630,6 +634,23 @@ class App:
         _bind_to_mousewheel(self.table)
 
         self._update_config_summary()
+        self._refresh_body_scrollregion()
+
+    def _on_scroll_canvas_configure(self, event: tk.Event) -> None:
+        if not self._scroll_canvas:
+            return
+        if self._scroll_window_id is not None:
+            self._scroll_canvas.itemconfigure(self._scroll_window_id, width=event.width)
+        self._refresh_body_scrollregion()
+
+    def _refresh_body_scrollregion(self) -> None:
+        canvas = self._scroll_canvas
+        if not canvas:
+            return
+        canvas.update_idletasks()
+        bbox = canvas.bbox("all")
+        if bbox:
+            canvas.configure(scrollregion=bbox)
 
     def _populate_trade_history_tree(self) -> None:
         if not self.trade_history_tree:
@@ -845,6 +866,7 @@ class App:
         self.table.add_row(
             trade_id,
             [
+                f"{combined_profit:.2f}",
                 trade_id,
                 symbol1,
                 lot1,
@@ -863,19 +885,17 @@ class App:
                 side_label,
                 f"{combined_commission:.2f}",
                 f"{combined_swap:.2f}",
-                f"{combined_profit:.2f}",
-                "Close",
             ],
             dynamic_fields={
-                "p1_commission": 5,
-                "p1_swap": 6,
-                "p1_profit": 7,
-                "p2_commission": 12,
-                "p2_swap": 13,
-                "p2_profit": 14,
-                "combined_commission": 16,
-                "combined_swap": 17,
-                "combined_profit": 18,
+                "combined_profit": 0,
+                "p1_commission": 6,
+                "p1_swap": 7,
+                "p1_profit": 8,
+                "p2_commission": 13,
+                "p2_swap": 14,
+                "p2_profit": 15,
+                "combined_commission": 17,
+                "combined_swap": 18,
             },
             close_callback=self._on_close_pair,
         )
@@ -883,6 +903,7 @@ class App:
         self.table.set_metrics(
             trade_id,
             {
+                "combined_profit": combined_profit,
                 "p1_commission": commission1,
                 "p1_swap": swap1,
                 "p1_profit": profit1,
@@ -891,9 +912,10 @@ class App:
                 "p2_profit": profit2,
                 "combined_commission": combined_commission,
                 "combined_swap": combined_swap,
-                "combined_profit": combined_profit,
             },
         )
+
+        self._refresh_body_scrollregion()
 
     def _snapshot_active_trades(self) -> list[Dict[str, Any]]:
         snapshot: list[Dict[str, Any]] = []
@@ -1786,6 +1808,7 @@ class App:
                 for future in futures:
                     future.result(timeout=20)
             self.table.remove_row(trade_id)
+            self._refresh_body_scrollregion()
             with self._trade_lock:
                 self.paired_trades.pop(trade_id, None)
             self._record_trade_history(history_entry)
@@ -1872,6 +1895,7 @@ class App:
                     with self._trade_lock:
                         original = self.paired_trades.pop(trade_id, None)
                     self.table.remove_row(trade_id)
+                    self._refresh_body_scrollregion()
                     if original:
                         account1_entry = dict(original.get("account1", {}) or {})
                         account2_entry = dict(original.get("account2", {}) or {})
