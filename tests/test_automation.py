@@ -204,6 +204,25 @@ class AutomationLogicTests(unittest.TestCase):
             [("T5", "spread")],
         )
 
+    def test_trade_forced_closed_when_window_expires(self) -> None:
+        opened = datetime(2024, 5, 5, 18, 0, tzinfo=timezone.utc)
+        trade = TrackedTrade(
+            "T6",
+            opened,
+            ("EURUSD", "USDJPY"),
+            720,
+            0.2,
+            "profit",
+            8.0,
+            time(1, 0),
+            time(5, 0),
+        )
+        after_window = datetime(2024, 5, 6, 6, 0, tzinfo=timezone.utc)
+        self.assertEqual(
+            trades_due_for_close([trade], after_window, {"EURUSD": 5.0}, {"T6": 2.0}),
+            [("T6", "time_window_elapsed")],
+        )
+
     def test_drawdown_detection(self) -> None:
         risk = RiskConfig(drawdown_enabled=True, drawdown_stop=5.0)
         

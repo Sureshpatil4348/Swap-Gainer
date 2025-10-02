@@ -422,12 +422,22 @@ def trades_due_for_close(
 
         start_window = trade.close_window_start
         end_window = trade.close_window_end
-        if (start_window is not None or end_window is not None) and not _time_in_window(
-            now.time(),
-            start_window,
-            end_window,
-        ):
-            continue
+        window_defined = start_window is not None or end_window is not None
+        if window_defined:
+            in_window = _time_in_window(
+                now.time(),
+                start_window,
+                end_window,
+            )
+            if not in_window:
+                if (
+                    start_window is not None
+                    and end_window is not None
+                    and start_window <= end_window
+                    and now.time() > end_window
+                ):
+                    to_close.append((trade.trade_id, "time_window_elapsed"))
+                continue
 
         condition = (trade.close_condition or "spread").lower()
         if condition not in {"spread", "profit", "spread_and_profit"}:
