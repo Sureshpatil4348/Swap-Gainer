@@ -39,6 +39,46 @@ DEFAULT_TERMINAL_1 = r"C:\Users\Public\Desktop\XM MT5.lnk"
 DEFAULT_TERMINAL_2 = r"C:\Users\Public\Desktop\Tickmill MT5 Terminal.lnk"
 
 
+ACTIVE_TRADE_VALUE_COLUMNS: list[str] = [
+    "Combined P/L",
+    "Trade ID",
+    "Account 1: Pair",
+    "Account 1: Lot",
+    "Account 1: Entry Price",
+    "Account 1: Entry Time",
+    "Account 1: Commission",
+    "Account 1: Swap",
+    "Account 1: P/L",
+    "Account 2: Pair",
+    "Account 2: Lot",
+    "Account 2: Entry Price",
+    "Account 2: Entry Time",
+    "Account 2: Commission",
+    "Account 2: Swap",
+    "Account 2: P/L",
+    "Side (Buy/Sell)",
+    "Combined Commission",
+    "Combined Swap",
+]
+
+_ACTIVE_TRADE_DYNAMIC_COLUMN_NAMES: dict[str, str] = {
+    "combined_profit": "Combined P/L",
+    "p1_commission": "Account 1: Commission",
+    "p1_swap": "Account 1: Swap",
+    "p1_profit": "Account 1: P/L",
+    "p2_commission": "Account 2: Commission",
+    "p2_swap": "Account 2: Swap",
+    "p2_profit": "Account 2: P/L",
+    "combined_commission": "Combined Commission",
+    "combined_swap": "Combined Swap",
+}
+
+ACTIVE_TRADE_DYNAMIC_FIELD_INDICES: dict[str, int] = {
+    key: ACTIVE_TRADE_VALUE_COLUMNS.index(column)
+    for key, column in _ACTIVE_TRADE_DYNAMIC_COLUMN_NAMES.items()
+}
+
+
 class WorkerClient:
     def __init__(self, name: str, terminal_path: str) -> None:
         self.name = name
@@ -441,28 +481,7 @@ class App:
 
         self.table = ScrollableTable(
             active_trades,
-            columns=[
-                "Close (both)",
-                "Combined P/L",
-                "Trade ID",
-                "Account 1: Pair",
-                "Account 1: Lot",
-                "Account 1: Entry Price",
-                "Account 1: Entry Time",
-                "Account 1: Commission",
-                "Account 1: Swap",
-                "Account 1: P/L",
-                "Account 2: Pair",
-                "Account 2: Lot",
-                "Account 2: Entry Price",
-                "Account 2: Entry Time",
-                "Account 2: Commission",
-                "Account 2: Swap",
-                "Account 2: P/L",
-                "Side (Buy/Sell)",
-                "Combined Commission",
-                "Combined Swap",
-            ],
+            columns=["Close (both)", *ACTIVE_TRADE_VALUE_COLUMNS],
         )
         self.table.grid(row=0, column=0, sticky="nsew")
         _bind_horizontal_mousewheel(self.table, self.table.canvas.xview_scroll)
@@ -863,40 +882,34 @@ class App:
         entry["account1"] = account1
         entry["account2"] = account2
 
+        value_map = {
+            "Combined P/L": f"{combined_profit:.2f}",
+            "Trade ID": trade_id,
+            "Account 1: Pair": symbol1,
+            "Account 1: Lot": lot1,
+            "Account 1: Entry Price": f"{price1:.5f}" if isinstance(price1, float) else "",
+            "Account 1: Entry Time": self._fmt_time(entry_time1),
+            "Account 1: Commission": f"{commission1:.2f}",
+            "Account 1: Swap": f"{swap1:.2f}",
+            "Account 1: P/L": f"{profit1:.2f}",
+            "Account 2: Pair": symbol2,
+            "Account 2: Lot": lot2,
+            "Account 2: Entry Price": f"{price2:.5f}" if isinstance(price2, float) else "",
+            "Account 2: Entry Time": self._fmt_time(entry_time2),
+            "Account 2: Commission": f"{commission2:.2f}",
+            "Account 2: Swap": f"{swap2:.2f}",
+            "Account 2: P/L": f"{profit2:.2f}",
+            "Side (Buy/Sell)": side_label,
+            "Combined Commission": f"{combined_commission:.2f}",
+            "Combined Swap": f"{combined_swap:.2f}",
+        }
+
+        values = [value_map.get(column, "") for column in ACTIVE_TRADE_VALUE_COLUMNS]
+
         self.table.add_row(
             trade_id,
-            [
-                f"{combined_profit:.2f}",
-                trade_id,
-                symbol1,
-                lot1,
-                f"{price1:.5f}" if isinstance(price1, float) else "",
-                self._fmt_time(entry_time1),
-                f"{commission1:.2f}",
-                f"{swap1:.2f}",
-                f"{profit1:.2f}",
-                symbol2,
-                lot2,
-                f"{price2:.5f}" if isinstance(price2, float) else "",
-                self._fmt_time(entry_time2),
-                f"{commission2:.2f}",
-                f"{swap2:.2f}",
-                f"{profit2:.2f}",
-                side_label,
-                f"{combined_commission:.2f}",
-                f"{combined_swap:.2f}",
-            ],
-            dynamic_fields={
-                "combined_profit": 0,
-                "p1_commission": 6,
-                "p1_swap": 7,
-                "p1_profit": 8,
-                "p2_commission": 13,
-                "p2_swap": 14,
-                "p2_profit": 15,
-                "combined_commission": 17,
-                "combined_swap": 18,
-            },
+            values,
+            dynamic_fields=dict(ACTIVE_TRADE_DYNAMIC_FIELD_INDICES),
             close_callback=self._on_close_pair,
         )
 
