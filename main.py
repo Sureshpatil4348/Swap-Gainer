@@ -390,11 +390,19 @@ class App:
         canvas.configure(yscrollcommand=scrollbar.set)
 
         scrollable_body = ttk.Frame(canvas)
-        scrollable_body.bind(
+        scrollable_body_window = canvas.create_window((0, 0), window=scrollable_body, anchor="nw")
+
+        def _update_scrollregion(*_args) -> None:
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        scrollable_body.bind("<Configure>", _update_scrollregion)
+        canvas.bind(
             "<Configure>",
-            lambda event: canvas.configure(scrollregion=canvas.bbox("all")),
+            lambda event: (
+                canvas.itemconfigure(scrollable_body_window, width=event.width),
+                _update_scrollregion(),
+            ),
         )
-        canvas.create_window((0, 0), window=scrollable_body, anchor="nw")
 
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
@@ -402,10 +410,26 @@ class App:
         self._scroll_canvas = canvas
         self._scrollable_body = scrollable_body
 
+        mousewheel_bound = False
+
+        def _ensure_mousewheel_binding() -> None:
+            nonlocal mousewheel_bound
+            if mousewheel_bound:
+                return
+            canvas.bind_all("<MouseWheel>", _on_mousewheel)
+            canvas.bind_all("<Shift-MouseWheel>", _on_shift_mousewheel)
+            canvas.bind_all("<Button-4>", _on_mousewheel)
+            canvas.bind_all("<Button-5>", _on_mousewheel)
+            mousewheel_bound = True
+
         def _on_mousewheel(event):
-            delta = getattr(event, 'delta', 0)
+            delta = getattr(event, "delta", 0)
             if delta:
                 canvas.yview_scroll(int(-1 * (delta / 120)), "units")
+            elif getattr(event, "num", None) == 4:
+                canvas.yview_scroll(-1, "units")
+            elif getattr(event, "num", None) == 5:
+                canvas.yview_scroll(1, "units")
 
         def _on_shift_mousewheel(event):
             delta = getattr(event, 'delta', 0)
@@ -413,8 +437,7 @@ class App:
                 canvas.xview_scroll(int(-1 * (delta / 120)), "units")
 
         def _bind_to_mousewheel(widget):
-            widget.bind("<Enter>", lambda _: (canvas.bind_all("<MouseWheel>", _on_mousewheel), canvas.bind_all("<Shift-MouseWheel>", _on_shift_mousewheel)))
-            widget.bind("<Leave>", lambda _: (canvas.unbind_all("<MouseWheel>"), canvas.unbind_all("<Shift-MouseWheel>")))
+            widget.bind("<Enter>", lambda _: _ensure_mousewheel_binding(), add="+")
 
         def _bind_horizontal_mousewheel(widget, xview_command):
             def _on_shift(event):
@@ -441,6 +464,7 @@ class App:
             active_trades,
             columns=[
                 "Close (both)",
+                "Combined Net Profit",
                 "Trade ID",
                 "Account 1: Pair",
                 "Account 1: Lot",
@@ -459,7 +483,6 @@ class App:
                 "Side (Buy/Sell)",
                 "Combined Commission",
                 "Combined Swap",
-                "Combined Net Profit",
             ],
         )
         self.table.grid(row=0, column=0, sticky="nsew")
@@ -630,8 +653,10 @@ class App:
         _bind_to_mousewheel(self.schedule_tree)
         _bind_to_mousewheel(self.config_tree)
         _bind_to_mousewheel(self.table)
+        _ensure_mousewheel_binding()
 
         self._update_config_summary()
+        self.root.after_idle(_update_scrollregion)
 
     def _populate_trade_history_tree(self) -> None:
         if not self.trade_history_tree:
@@ -847,6 +872,7 @@ class App:
         self.table.add_row(
             trade_id,
             [
+                f"{combined_profit:.2f}",
                 trade_id,
                 symbol1,
                 lot1,
@@ -865,18 +891,17 @@ class App:
                 side_label,
                 f"{combined_commission:.2f}",
                 f"{combined_swap:.2f}",
-                f"{combined_profit:.2f}",
             ],
             dynamic_fields={
-                "p1_commission": 5,
-                "p1_swap": 6,
-                "p1_profit": 7,
-                "p2_commission": 12,
-                "p2_swap": 13,
-                "p2_profit": 14,
-                "combined_commission": 16,
-                "combined_swap": 17,
-                "combined_profit": 18,
+                "combined_profit": 0,
+                "p1_commission": 6,
+                "p1_swap": 7,
+                "p1_profit": 8,
+                "p2_commission": 13,
+                "p2_swap": 14,
+                "p2_profit": 15,
+                "combined_commission": 17,
+                "combined_swap": 18,
             },
             close_callback=self._on_close_pair,
         )
