@@ -141,7 +141,8 @@ class ScrollableTable(ttk.Frame):
         for c, col in enumerate(columns):
             lbl = ttk.Label(self.inner, text=col, font=("Segoe UI", 9, "bold"))
             lbl.grid(row=0, column=c, sticky="nsew", padx=4, pady=(2, 6))
-            self.inner.columnconfigure(c, weight=0, minsize=140)
+            minsize = 100 if col.lower().startswith("close") else 140
+            self.inner.columnconfigure(c, weight=0, minsize=minsize)
 
         self._next_row = 1
         self._rows: Dict[str, Dict[str, Any]] = {}
@@ -169,23 +170,24 @@ class ScrollableTable(ttk.Frame):
         dynamic_labels: Dict[str, ttk.Label] = {}
         index_to_key = {idx: key for key, idx in dynamic_fields.items()}
 
-        for c, val in enumerate(values[:-1]):  # except last column (Close button)
+        # Close button in the first column
+        btn = ttk.Button(self.inner, text="Close", command=lambda: close_callback(row_id))
+        btn.grid(row=self._next_row, column=0, sticky="nsew", padx=4, pady=2)
+        btn.bind("<Shift-MouseWheel>", self._on_shift_mousewheel)
+
+        for c, val in enumerate(values):
+            column_index = c + 1  # shift by one to account for the close button column
             if c in index_to_key:
                 lbl = ttk.Label(self.inner, text=str(val))
-                lbl.grid(row=self._next_row, column=c, sticky="nsew", padx=4, pady=2)
+                lbl.grid(row=self._next_row, column=column_index, sticky="nsew", padx=4, pady=2)
                 lbl.bind("<Shift-MouseWheel>", self._on_shift_mousewheel)
                 dynamic_labels[index_to_key[c]] = lbl
                 widgets.append(lbl)
             else:
                 w = ttk.Label(self.inner, text=str(val))
-                w.grid(row=self._next_row, column=c, sticky="nsew", padx=4, pady=2)
+                w.grid(row=self._next_row, column=column_index, sticky="nsew", padx=4, pady=2)
                 w.bind("<Shift-MouseWheel>", self._on_shift_mousewheel)
                 widgets.append(w)
-
-        # Close button
-        btn = ttk.Button(self.inner, text="Close", command=lambda: close_callback(row_id))
-        btn.grid(row=self._next_row, column=len(values) - 1, sticky="nsew", padx=4, pady=2)
-        btn.bind("<Shift-MouseWheel>", self._on_shift_mousewheel)
 
         self._rows[row_id] = {
             "widgets": widgets,
@@ -438,6 +440,7 @@ class App:
         self.table = ScrollableTable(
             active_trades,
             columns=[
+                "Close (both)",
                 "Trade ID",
                 "Account 1: Pair",
                 "Account 1: Lot",
@@ -457,7 +460,6 @@ class App:
                 "Combined Commission",
                 "Combined Swap",
                 "Combined Net Profit",
-                "Close (both)",
             ],
         )
         self.table.grid(row=0, column=0, sticky="nsew")
@@ -864,7 +866,6 @@ class App:
                 f"{combined_commission:.2f}",
                 f"{combined_swap:.2f}",
                 f"{combined_profit:.2f}",
-                "Close",
             ],
             dynamic_fields={
                 "p1_commission": 5,
