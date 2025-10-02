@@ -118,6 +118,15 @@ class WorkerClient:
 
 class ScrollableTable(ttk.Frame):
     def __init__(self, master: tk.Misc, columns: list[str]) -> None:
+        """
+        Create a scrollable table frame with a header row and configured column sizing.
+        
+        Initializes an internal Canvas with horizontal and vertical scrollbars, an inner Frame used as the table surface, and binds scrolling and resize behavior so rows added later will be scrollable. Adds header labels from `columns` in the first row and configures each column's minimum width (uses a smaller minimum for headers that start with "close").
+        
+        Parameters:
+        	master (tk.Misc): Parent Tk widget for this frame.
+        	columns (list[str]): Ordered list of column header names to display in the header row.
+        """
         super().__init__(master)
         self.canvas = tk.Canvas(self, borderwidth=0, highlightthickness=0)
         self.scroll_y = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
@@ -166,6 +175,17 @@ class ScrollableTable(ttk.Frame):
         dynamic_fields: Dict[str, int],
         close_callback,
     ) -> None:
+        """
+        Add a new row to the table with a leading "Close" button and one label per value.
+        
+        Creates a "Close" button in the first column that calls close_callback(row_id) when pressed, then creates Label widgets for each item in values placed in subsequent columns. For any entry in dynamic_fields (a mapping of field key -> value-index), the corresponding Label is stored in the row's `dynamic_labels` dictionary so it can be updated later. The row's widgets, dynamic label references, button, and grid row index are saved in self._rows under row_id. The internal row counter is incremented and the table scroll region is updated.
+        
+        Parameters:
+            row_id (str): Unique identifier used to store and later reference the row.
+            values (list[Any]): Sequence of cell values to render (one Label per value); these are placed starting at column 1 because column 0 is the Close button.
+            dynamic_fields (Dict[str, int]): Mapping from dynamic field key to index in `values`; labels for these indices are kept accessible for later updates.
+            close_callback (Callable[[str], Any]): Callback invoked with the row_id when the row's Close button is clicked.
+        """
         widgets = []
         dynamic_labels: Dict[str, ttk.Label] = {}
         index_to_key = {idx: key for key, idx in dynamic_fields.items()}
@@ -334,6 +354,11 @@ class App:
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
     def _build_ui(self) -> None:
+        """
+        Builds and lays out the application's main GUI components.
+        
+        Creates the top connection panel (terminal path entries, connect button, automation status, account summaries, UTC clock), a scrollable main body, and the primary content sections: Active Trades table, Active Drives (schedule) view, Configuration Snapshot view with reload action, and Trade History view. Also configures scrolling behavior (vertical and horizontal mouse/shift-wheel bindings), column/row weights, and initial bindings for updating the displayed configuration snapshot.
+        """
         pad = {"padx": 6, "pady": 4}
 
         top = ttk.LabelFrame(self.root, text="Connections")
@@ -758,6 +783,27 @@ class App:
         self._invoke_on_ui(_update)
 
     def _add_trade_to_table(self, trade_id: str, entry: Dict[str, Any]) -> None:
+        """
+        Add a paired-trade entry row to the UI table and initialize its dynamic metric cells.
+        
+        Normalizes and sanitizes fields from the provided entry (expected to contain `account1` and `account2` sub-dictionaries), computes per-account and combined commission/swap/profit values, formats display values (prices, times, amounts), inserts a new row into the scrollable table with a per-row close callback, and initializes the table's dynamic metric labels for subsequent updates.
+        
+        Parameters:
+            trade_id (str): Unique identifier for the paired trade row.
+            entry (dict): Trade entry dictionary expected to include `account1` and `account2` mappings. Each account mapping may contain the following keys (all optional):
+                - symbol: symbol string.
+                - lot: numeric or string lot size.
+                - entry_price: numeric or string entry price.
+                - entry_time: numeric timestamp or string.
+                - commission or last_commission: numeric commission amount.
+                - swap or last_swap: numeric swap amount.
+                - last_profit or profit: numeric profit amount.
+                - side: order side string (e.g., "buy" or "sell").
+        
+        Notes:
+            - If the UI table is not available, the function returns without action.
+            - The function updates `entry['account1']` and `entry['account2']` in-place with normalized numeric values for lots, prices, times, commission, swap, and profit.
+        """
         if not getattr(self, "table", None):
             return
 
