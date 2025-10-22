@@ -23,6 +23,20 @@ def _normalise_close_condition(value: Optional[object]) -> str:
     return "spread"
 
 
+def _coerce_bool(value: Optional[object]) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "yes", "y", "on"}:
+            return True
+        if lowered in {"0", "false", "no", "n", "off"}:
+            return False
+    return False
+
+
 @dataclass
 class ThreadSchedule:
     thread_id: str
@@ -43,6 +57,7 @@ class ThreadSchedule:
     close_window_start: str = ""
     close_window_end: str = ""
     weekdays: List[int] = field(default_factory=_default_primary_weekdays)
+    keep_open_until_drawdown: bool = False
 
     def to_dict(self) -> Dict[str, object]:
         return {
@@ -64,6 +79,7 @@ class ThreadSchedule:
             "close_window_start": self.close_window_start,
             "close_window_end": self.close_window_end,
             "weekdays": list(self.weekdays),
+            "keep_open_until_drawdown": self.keep_open_until_drawdown,
         }
 
     @staticmethod
@@ -123,6 +139,7 @@ class ThreadSchedule:
             close_window_start=str(data.get("close_window_start") or ""),
             close_window_end=str(data.get("close_window_end") or ""),
             weekdays=wd,
+            keep_open_until_drawdown=_coerce_bool(data.get("keep_open_until_drawdown")),
         )
 
 
@@ -330,6 +347,7 @@ class TrackedTrade:
     min_combined_profit: float = 0.0
     close_window_start: Optional[time] = None
     close_window_end: Optional[time] = None
+    keep_open_until_drawdown: bool = False
 
 
 def parse_time_string(value: str) -> Optional[time]:
@@ -369,6 +387,16 @@ def schedule_should_trigger(
         return False
     if schedule.weekdays and now.weekday() not in schedule.weekdays:
         return False
+    if schedule.keep_open_until_drawdown:
+        active_trades = getattr(state, "active_trades", [])
+        if isinstance(active_trades, list):
+            for entry in active_trades:
+                if not isinstance(entry, dict):
+                    continue
+                tid = str(entry.get("thread_id") or "").strip()
+                if tid and tid == schedule.thread_id:
+                    return False
+
     start_at = parse_time_string(schedule.entry_start)
     end_at = parse_time_string(schedule.entry_end) if schedule.entry_end else None
     if start_at is None and end_at is None:
@@ -398,7 +426,10 @@ def trades_due_for_close(
     close conditions are ``"spread"`` (default behaviour), ``"profit"`` and
     ``"spread_and_profit"``. Trades may optionally define a closing time window
     via ``close_window_start`` / ``close_window_end``; if provided the current
-    timestamp must fall within that window for the trade to be considered.
+    timestamp must fall within that window for the trade to be considered. When
+    ``keep_open_until_drawdown`` is set on a trade the automation will skip all
+    automatic close checks, leaving termination to manual actions or global risk
+    controls such as drawdown stops.
 
     Parameters:
         trades: Tracked trades to evaluate.
@@ -414,6 +445,8 @@ def trades_due_for_close(
 
     to_close: List[Tuple[str, str]] = []
     for trade in trades:
+        if getattr(trade, "keep_open_until_drawdown", False):
+            continue
         min_hold_minutes = max(int(trade.close_after_minutes), 0)
         hold_delta = timedelta(minutes=min_hold_minutes) if min_hold_minutes > 0 else None
 

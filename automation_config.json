@@ -23,7 +23,8 @@
       "min_combined_profit": 0.0,
       "close_window_start": "",
       "close_window_end": "",
-      "weekdays": [0, 1, 2, 3, 4]
+      "weekdays": [0, 1, 2, 3, 4],
+      "keep_open_until_drawdown": false
     },
     {
       "thread_id": "primary-2",
@@ -43,7 +44,8 @@
       "min_combined_profit": 12.5,
       "close_window_start": "12:30",
       "close_window_end": "17:00",
-      "weekdays": [0, 1, 2, 3, 4]
+      "weekdays": [0, 1, 2, 3, 4],
+      "keep_open_until_drawdown": false
     }
   ],
   "wednesday_threads": [
@@ -65,7 +67,8 @@
       "min_combined_profit": 15.0,
       "close_window_start": "20:30",
       "close_window_end": "23:30",
-      "weekdays": [2]
+      "weekdays": [2],
+      "keep_open_until_drawdown": false
     },
     {
       "thread_id": "wednesday-2",
@@ -85,7 +88,8 @@
       "min_combined_profit": 0.0,
       "close_window_start": "",
       "close_window_end": "",
-      "weekdays": [2]
+      "weekdays": [2],
+      "keep_open_until_drawdown": false
     },
     {
       "thread_id": "wednesday-3",
@@ -105,7 +109,8 @@
       "min_combined_profit": 10.0,
       "close_window_start": "05:30",
       "close_window_end": "08:00",
-      "weekdays": [2]
+      "weekdays": [2],
+      "keep_open_until_drawdown": false
     }
   ]
 }
