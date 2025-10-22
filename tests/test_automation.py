@@ -132,6 +132,20 @@ class AutomationLogicTests(unittest.TestCase):
             [("T4", "profit")],
         )
 
+    def test_persistent_trade_not_auto_closed(self) -> None:
+        opened = self.now - timedelta(minutes=720)
+        trade = TrackedTrade(
+            "TP",
+            opened,
+            ("EURUSD", "USDJPY"),
+            60,
+            0.4,
+            keep_open_until_drawdown=True,
+        )
+        spreads = {"EURUSD": 0.1, "USDJPY": 0.1}
+        profits = {"TP": 25.0}
+        self.assertEqual(trades_due_for_close([trade], self.now, spreads, profits), [])
+
     def test_gather_active_trades_uses_running_profit(self) -> None:
         schedule = ThreadSchedule(
             thread_id="primary-1",
@@ -141,6 +155,7 @@ class AutomationLogicTests(unittest.TestCase):
             symbol2="USDJPY",
             close_condition="profit",
             min_combined_profit=10.0,
+            keep_open_until_drawdown=True,
         )
         config = AppConfig(
             timezone="UTC",
@@ -178,6 +193,7 @@ class AutomationLogicTests(unittest.TestCase):
         # Combined profit should use the running PnL values only.
         expected_profit = 8.0 + 5.0
         self.assertAlmostEqual(profits["T100"], expected_profit)
+        self.assertTrue(trades[0].keep_open_until_drawdown)
 
     def test_trades_due_for_close_respects_close_window(self) -> None:
         opened = self.now - timedelta(minutes=180)
@@ -222,6 +238,26 @@ class AutomationLogicTests(unittest.TestCase):
             trades_due_for_close([trade], after_window, {"EURUSD": 5.0}, {"T6": 2.0}),
             [("T6", "time_window_elapsed")],
         )
+
+    def test_persistent_schedule_waits_for_existing_trade(self) -> None:
+        schedule = ThreadSchedule(
+            thread_id="primary-1",
+            name="Primary Set 1",
+            enabled=True,
+            entry_start="09:00",
+            entry_end="10:00",
+            weekdays=[0],
+            keep_open_until_drawdown=True,
+        )
+        state = AutomationState(
+            last_runs={},
+            trade_history=[],
+            active_trades=[{"thread_id": "primary-1", "trade_id": "T123"}],
+        )
+        now = datetime(2024, 5, 6, 9, 30, tzinfo=timezone.utc)
+        self.assertFalse(schedule_should_trigger(schedule, now, state))
+        state.active_trades = []
+        self.assertTrue(schedule_should_trigger(schedule, now, state))
 
     def test_drawdown_detection(self) -> None:
         risk = RiskConfig(drawdown_enabled=True, drawdown_stop=5.0)

@@ -741,8 +741,11 @@ class App:
             self.config_tree.insert(node, 'end', text='Entry Window', values=(self._format_entry_window(thread),))
             self.config_tree.insert(node, 'end', text='Weekdays', values=(self._format_weekdays(thread.weekdays),))
             self.config_tree.insert(node, 'end', text='Max Entry Spread', values=(self._format_number(thread.max_entry_spread),))
-            close_after = self._hours_from_minutes(thread.close_after_minutes)
-            close_text = f"{close_after} h" if close_after != '0' else 'n/a'
+            if thread.keep_open_until_drawdown:
+                close_text = 'Manual / drawdown'
+            else:
+                close_after = self._hours_from_minutes(thread.close_after_minutes)
+                close_text = f"{close_after} h" if close_after != '0' else 'n/a'
             self.config_tree.insert(node, 'end', text='Close After', values=(close_text,))
             self.config_tree.insert(node, 'end', text='Max Exit Spread', values=(self._format_number(thread.max_exit_spread),))
             self.config_tree.insert(
@@ -920,6 +923,15 @@ class App:
                 "combined_profit": combined_profit,
             },
         )
+
+    def _has_active_trade_for_thread(self, thread_id: Optional[str]) -> bool:
+        if not thread_id:
+            return False
+        with self._trade_lock:
+            for info in self.paired_trades.values():
+                if str(info.get("thread_id") or "") == thread_id:
+                    return True
+        return False
 
     def _snapshot_active_trades(self) -> list[Dict[str, Any]]:
         snapshot: list[Dict[str, Any]] = []
@@ -1264,6 +1276,8 @@ class App:
         return "Any time"
 
     def _format_close_condition(self, schedule: ThreadSchedule) -> str:
+        if schedule.keep_open_until_drawdown:
+            return "Manual close / Drawdown"
         condition = (schedule.close_condition or "spread").lower()
         spread_limit = float(schedule.max_exit_spread or 0.0)
         profit_target = float(schedule.min_combined_profit or 0.0)
@@ -1282,6 +1296,8 @@ class App:
         return spread_text
 
     def _format_close_rule(self, schedule: ThreadSchedule) -> str:
+        if schedule.keep_open_until_drawdown:
+            return "Manual close or drawdown stop"
         parts: list[str] = []
         hold_minutes = max(int(schedule.close_after_minutes or 0), 0)
         if hold_minutes > 0:
@@ -1338,6 +1354,8 @@ class App:
     ) -> Optional[Union[datetime, str]]:
         if not schedule.enabled:
             return None
+        if schedule.keep_open_until_drawdown and self._has_active_trade_for_thread(schedule.thread_id):
+            return "Active (manual/drawdown)"
         start_time = parse_time_string(schedule.entry_start)
         if start_time is None:
             return "Set entry time"
@@ -1418,6 +1436,7 @@ class App:
                 sides[1],
                 schedule_name=schedule.name,
                 schedule_thread_id=schedule.thread_id,
+                keep_open_until_drawdown=schedule.keep_open_until_drawdown,
             )
             self._set_automation_status(
                 f"Scheduled trade executed for {schedule.name} ({schedule.thread_id}).",
@@ -1445,6 +1464,8 @@ class App:
         side2: str,
         schedule_name: Optional[str] = None,
         schedule_thread_id: Optional[str] = None,
+        *,
+        keep_open_until_drawdown: bool = False,
     ) -> str:
         if not (self.connected1 and self.connected2 and self.worker1 and self.worker2):
             raise RuntimeError("Connect both terminals first.")
@@ -1487,6 +1508,7 @@ class App:
             "schedule": schedule_name or "manual",
             "thread_id": schedule_thread_id,
             "opened_at": time.time(),
+            "keep_open_until_drawdown": bool(keep_open_until_drawdown),
         }
         with self._trade_lock:
             self.paired_trades[trade_id] = entry
@@ -1576,6 +1598,9 @@ class App:
                 min_profit = float(schedule.min_combined_profit if schedule else 0.0 or 0.0)
                 window_start = parse_time_string(schedule.close_window_start) if schedule else None
                 window_end = parse_time_string(schedule.close_window_end) if schedule else None
+                entry_keep_open = bool(info.get("keep_open_until_drawdown"))
+                schedule_keep_open = bool(schedule.keep_open_until_drawdown) if schedule else False
+                keep_open = entry_keep_open or schedule_keep_open
                 profit1 = float(account1.get("last_profit", account1.get("profit", 0.0)) or 0.0)
                 profit2 = float(account2.get("last_profit", account2.get("profit", 0.0)) or 0.0)
                 profits[trade_id] = profit1 + profit2
@@ -1590,6 +1615,7 @@ class App:
                         min_profit,
                         window_start,
                         window_end,
+                        keep_open_until_drawdown=keep_open,
                     )
                 )
         return trades, requests, profits
@@ -1624,6 +1650,8 @@ class App:
         if connected:
             all_threads = [*config.primary_threads, *config.wednesday_threads]
             for schedule in all_threads:
+                if schedule.keep_open_until_drawdown and self._has_active_trade_for_thread(schedule.thread_id):
+                    continue
                 if not schedule_should_trigger(schedule, now, state):
                     continue
                 symbols = [s for s in (schedule.symbol1, schedule.symbol2) if s]
